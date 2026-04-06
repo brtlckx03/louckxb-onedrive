@@ -1,6 +1,6 @@
 /**
  * Unit tests for the shared helper methods used by SearchAndDownload and FindBiggestFolders.
- * Run with:  java --enable-preview src/OneDriveHelpersTest.java
+ * Run with:  java --enable-preview src/net.lckx.onedrive.OneDriveHelpersTest.java
  * <p>
  * User: louckxb, Date: 29/03/2026.
  */

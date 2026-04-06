@@ -22,14 +22,14 @@ The apps request **read-only** access (`Files.Read` + `offline_access`).
 
 ---
 
-## SearchAndDownload
+## net.lckx.onedrive.SearchAndDownload
 
 Interactive folder browser with download capability.
 
 ### Run
 
 ```bash
-java --enable-preview src/SearchAndDownload.java
+java --enable-preview src/net.lckx.onedrive.SearchAndDownload.java
 ```
 
 ### Features
@@ -83,14 +83,14 @@ Proceed? [Y/n]: y
 
 ---
 
-## FindBiggestFolders
+## net.lckx.onedrive.FindBiggestFolders
 
 Scans your entire OneDrive and ranks folders by total size.
 
 ### Run
 
 ```bash
-java --enable-preview src/FindBiggestFolders.java
+java --enable-preview src/net.lckx.onedrive.FindBiggestFolders.java
 ```
 
 ### How it works
@@ -124,9 +124,9 @@ Total OneDrive usage: 42.3 GB
 
 ```
 src/
-├── SearchAndDownload.java      # Interactive browser & downloader
-├── FindBiggestFolders.java     # Folder size analyzer
-└── OneDriveHelpersTest.java    # Unit tests for shared helper methods
+├── net.lckx.onedrive.SearchAndDownload.java      # Interactive browser & downloader
+├── net.lckx.onedrive.FindBiggestFolders.java     # Folder size analyzer
+└── net.lckx.onedrive.OneDriveHelpersTest.java    # Unit tests for shared helper methods
 ```
 
 ## Shared internals

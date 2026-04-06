@@ -72,18 +72,18 @@ void main() throws Exception {
     collectFiles(localFolder, allFiles);
     System.out.printf("\r  Found %d files to upload%n", allFiles.size());
 
-    System.out.printf("Upload \"%s\" → OneDrive: \"%s\"%n", localFolder, remotePath);
+    System.out.printf("net.lckx.onedrive.Upload \"%s\" → OneDrive: \"%s\"%n", localFolder, remotePath);
     System.out.print("Proceed? [Y/n]: ");
     String confirm = scanner.nextLine().trim();
     if (!confirm.isEmpty() && !confirm.equalsIgnoreCase("y")) return;
 
-    // Step 5: Upload
+    // Step 5: net.lckx.onedrive.Upload
     long startTime = System.currentTimeMillis();
     int[] counters = {0, allFiles.size()}; // [done, total]
     uploadFolder(client, accessToken, localFolder, remotePath, startTime, counters);
 
     long elapsed = System.currentTimeMillis() - startTime;
-    System.out.printf("%n  ✅ Upload complete — %d files in %s%n", counters[0], formatDuration(elapsed));
+    System.out.printf("%n  ✅ net.lckx.onedrive.Upload complete — %d files in %s%n", counters[0], formatDuration(elapsed));
 
     // Move the uploaded folder to the local archive (same year-prefix logic as remote path)
     String folderNameStr = localFolder.getFileName().toString();
@@ -99,7 +99,7 @@ void main() throws Exception {
     }
 }
 
-// --- Upload logic ---
+// --- net.lckx.onedrive.Upload logic ---
 
 /**
  * Recursively collects all files under a directory.
@@ -229,7 +229,7 @@ void uploadLarge(HttpClient client, String accessToken, Path file,
     if (sessionResp.contains("\"error\"")) throw new Exception(jsonString(sessionResp, "message"));
     String uploadUrl = jsonString(sessionResp, "uploadUrl");
 
-    // Upload in chunks
+    // net.lckx.onedrive.Upload in chunks
     try (InputStream in = Files.newInputStream(file)) {
         long uploaded = 0;
         byte[] buffer = new byte[CHUNK_SIZE];
