@@ -86,8 +86,8 @@ public class AndroidPhoneTest {
 
             if (phone.getPhotoCount() > 0) {
                 List<AndroidPhone.PhotoFile> allPhotos = phone.getAllPhotos();
-                System.out.println("   First photo: " + allPhotos.get(0).getFilename());
-                System.out.println("   Last photo: " + allPhotos.get(allPhotos.size() - 1).getFilename());
+                System.out.println("   First photo: " + allPhotos.get(0).filename());
+                System.out.println("   Last photo: " + allPhotos.get(allPhotos.size() - 1).filename());
             }
         } catch (IOException e) {
             System.out.println("❌ Phone connection failed: " + e.getMessage());
@@ -115,7 +115,7 @@ public class AndroidPhoneTest {
             List<AndroidPhone.PhotoFile> allPhotos = phone.getAllPhotos();
 
             // Get a date from the actual photos
-            LocalDate sampleDate = allPhotos.get(0).getModifiedDateTime().toLocalDate();
+            LocalDate sampleDate = allPhotos.get(0).modifiedDateTime().toLocalDate();
             System.out.println("Testing with date: " + sampleDate + "\n");
 
             List<AndroidPhone.PhotoFile> filteredPhotos = phone.getPhotosByDate(sampleDate);
@@ -125,8 +125,8 @@ public class AndroidPhoneTest {
             if (!filteredPhotos.isEmpty()) {
                 System.out.println("\n  Sample photos:");
                 filteredPhotos.stream().limit(3).forEach(p ->
-                    System.out.println("    - " + p.getFilename() +
-                        " (" + phone.formatFileSize(p.getSize()) + ")")
+                    System.out.println("    - " + p.filename() +
+                        " (" + phone.formatFileSize(p.size()) + ")")
                 );
                 if (filteredPhotos.size() > 3) {
                     System.out.println("    ... and " + (filteredPhotos.size() - 3) + " more");
@@ -151,7 +151,7 @@ public class AndroidPhoneTest {
             }
 
             List<AndroidPhone.PhotoFile> allPhotos = phone.getAllPhotos();
-            LocalDate startDate = allPhotos.get(0).getModifiedDateTime().toLocalDate();
+            LocalDate startDate = allPhotos.get(0).modifiedDateTime().toLocalDate();
             LocalDate endDate = startDate.plusDays(7); // 7-day range
 
             System.out.println("Testing range: " + startDate + " to " + endDate + "\n");
@@ -163,12 +163,12 @@ public class AndroidPhoneTest {
             if (!rangePhotos.isEmpty()) {
                 System.out.println("\n  Date distribution in range:");
                 rangePhotos.stream()
-                    .map(p -> p.getModifiedDateTime().toLocalDate())
+                    .map(p -> p.modifiedDateTime().toLocalDate())
                     .distinct()
                     .sorted()
                     .forEach(date -> {
                         long count = rangePhotos.stream()
-                            .filter(p -> p.getModifiedDateTime().toLocalDate().equals(date))
+                            .filter(p -> p.modifiedDateTime().toLocalDate().equals(date))
                             .count();
                         System.out.println("    " + date + ": " + count + " photos");
                     });
@@ -196,7 +196,7 @@ public class AndroidPhoneTest {
 
             if (phone.getPhotoCount() > 0) {
                 List<AndroidPhone.PhotoFile> allPhotos = phone.getAllPhotos();
-                LocalDate testDate = allPhotos.get(0).getModifiedDateTime().toLocalDate();
+                LocalDate testDate = allPhotos.get(0).modifiedDateTime().toLocalDate();
 
                 // Measure filter time
                 phone.getPhotosByDate(testDate);

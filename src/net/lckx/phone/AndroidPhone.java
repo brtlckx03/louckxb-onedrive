@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
 public class AndroidPhone {
     private static final String[] PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".heic"};
     private boolean adbAvailable = false;
-    private List<PhotoFile> photoFiles;
+    private final List<PhotoFile> photoFiles;
     private long loadTimeMs = 0;
     private long filterTimeMs = 0;
 
@@ -90,14 +90,21 @@ public class AndroidPhone {
         String device = devices.getFirst();
         System.out.println("Connected to device: " + device);
 
-        // Try common photo directories
+        // Try common photo directories (in order of preference)
         String[] photoDirs = {
                 "/sdcard/DCIM/Camera",
+                "/sdcard/SdCardBackUp/DCIM/Camera",
+                "/sdcard/WhatsApp/Media/WhatsApp Images",
                 "/sdcard/DCIM",
                 "/sdcard/Pictures",
-                "/storage/emulated/0/DCIM/Camera"
+                "/sdcard/WhatsApp/Media/WhatsApp Video",
+                "/storage/emulated/0/DCIM/Camera",
+                "/storage/emulated/0/Pictures"
         };
 
+        //2013-07-16
+        //  [99/1252] Failed: 2016-04-22
+        //  [100/1252] Downloaded: IMG_20160826_095031.jpg
         for (String dir : photoDirs) {
             try {
                 loadPhotosFromDirectory(device, dir);
@@ -114,7 +121,43 @@ public class AndroidPhone {
             throw new IOException("No photos found in DCIM or Pictures directories");
         }
 
-        photoFiles.sort(Comparator.comparing(PhotoFile::getModifiedDateTime));
+        photoFiles.sort(Comparator.comparing(PhotoFile::modifiedDateTime));
+
+        loadTimeMs = System.currentTimeMillis() - startTime;
+    }
+
+    /**
+     * Loads photos from a custom directory on the phone via ADB.
+     * Useful for accessing backup folders or non-standard locations.
+     *
+     * @param customDir The full path to the directory on the phone (e.g., "/sdcard/SdCardBackUp/DCIM/Camera")
+     * @throws IOException if directory doesn't exist or can't be read
+     */
+    public void loadPhotosFromCustomDirectory(String customDir) throws IOException {
+        long startTime = System.currentTimeMillis();
+        photoFiles.clear();
+
+        List<String> devices = getConnectedDevices();
+        if (devices.isEmpty()) {
+            throw new IOException("No Android devices connected. Connect phone via USB and enable USB Debugging.");
+        }
+
+        String device = devices.getFirst();
+        System.out.println("Connected to device: " + device);
+        System.out.println("Loading photos from custom directory: " + customDir);
+
+        try {
+            loadPhotosFromDirectory(device, customDir);
+            if (!photoFiles.isEmpty()) {
+                System.out.println("✓ Found " + photoFiles.size() + " photos in: " + customDir);
+            } else {
+                throw new IOException("No photos found in: " + customDir);
+            }
+        } catch (IOException e) {
+            throw new IOException("Failed to load from custom directory: " + e.getMessage());
+        }
+
+        photoFiles.sort(Comparator.comparing(PhotoFile::modifiedDateTime));
 
         loadTimeMs = System.currentTimeMillis() - startTime;
     }
@@ -127,7 +170,8 @@ public class AndroidPhone {
     private void loadPhotosFromDirectory(String device, String dir) throws IOException {
         try {
             // Use ls -l to get all files with metadata in one command (non-recursive)
-            ProcessBuilder pb = new ProcessBuilder("adb", "-s", device, "shell", "ls", "-l", dir);
+            // Quote directory path to handle spaces in directory names
+            ProcessBuilder pb = new ProcessBuilder("adb", "-s", device, "shell", "ls -l '" + dir + "'");
             Process process = pb.start();
             BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream())
@@ -151,18 +195,25 @@ public class AndroidPhone {
                 try {
                     // Parse ls -l output: -rw-rw---- 1 u0_a293 media_rw 4488849 2021-08-09 16:17 filename.jpg
                     // When split on whitespace:
-                    // [0]=perms, [1]=links, [2]=user, [3]=group, [4]=size, [5]=date, [6]=time, [7]=filename
+                    // [0]=perms, [1]=links, [2]=user, [3]=group, [4]=size, [5]=date, [6]=time, [7+]=filename (may have spaces)
                     String[] parts = line.split("\\s+");
                     if (parts.length >= 8) {
                         long size = Long.parseLong(parts[4]);
                         String dateStr = parts[5];  // YYYY-MM-DD
                         String timeStr = parts[6];  // HH:MM
-                        String filename = parts[7];
+
+                        // Filename may contain spaces, so join all parts from index 7 onwards
+                        StringBuilder filenameBuilder = new StringBuilder();
+                        for (int i = 7; i < parts.length; i++) {
+                            if (i > 7) filenameBuilder.append(" ");
+                            filenameBuilder.append(parts[i]);
+                        }
+                        String filename = filenameBuilder.toString();
 
                         try {
                             LocalDateTime modTime = LocalDateTime.parse(
-                                dateStr + "T" + timeStr + ":00",
-                                java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME
+                                    dateStr + "T" + timeStr + ":00",
+                                    java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME
                             );
 
                             String fullPath = dir + "/" + filename;
@@ -198,9 +249,9 @@ public class AndroidPhone {
             }
             // Try ls format: MMM DD HH:MM or MMM DD YYYY
             DateTimeFormatter[] formats = {
-                DateTimeFormatter.ofPattern("MMM dd HH:mm"),
-                DateTimeFormatter.ofPattern("MMM dd yyyy"),
-                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+                    DateTimeFormatter.ofPattern("MMM dd HH:mm"),
+                    DateTimeFormatter.ofPattern("MMM dd yyyy"),
+                    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             };
             for (DateTimeFormatter fmt : formats) {
                 try {
@@ -231,7 +282,7 @@ public class AndroidPhone {
     public List<PhotoFile> getPhotosByDate(LocalDate date) {
         long startTime = System.currentTimeMillis();
         List<PhotoFile> results = photoFiles.stream()
-                .filter(p -> p.getModifiedDateTime().toLocalDate().equals(date))
+                .filter(p -> p.modifiedDateTime().toLocalDate().equals(date))
                 .collect(Collectors.toList());
         filterTimeMs = System.currentTimeMillis() - startTime;
         return results;
@@ -241,7 +292,7 @@ public class AndroidPhone {
         long startTime = System.currentTimeMillis();
         List<PhotoFile> results = photoFiles.stream()
                 .filter(p -> {
-                    LocalDate photoDate = p.getModifiedDateTime().toLocalDate();
+                    LocalDate photoDate = p.modifiedDateTime().toLocalDate();
                     return !photoDate.isBefore(startDate) && !photoDate.isAfter(endDate);
                 })
                 .collect(Collectors.toList());
@@ -252,7 +303,7 @@ public class AndroidPhone {
     public List<PhotoFile> getPhotosByYearMonth(int year, int month) {
         return photoFiles.stream()
                 .filter(p -> {
-                    LocalDateTime dt = p.getModifiedDateTime();
+                    LocalDateTime dt = p.modifiedDateTime();
                     return dt.getYear() == year && dt.getMonthValue() == month;
                 })
                 .collect(Collectors.toList());
@@ -301,58 +352,25 @@ public class AndroidPhone {
 
         System.out.println("\n=== Photo Summary ===");
         System.out.println("Total photos: " + photoFiles.size());
-        System.out.println("Date range: " + photoFiles.getFirst().getModifiedDateTime().toLocalDate() +
-                " to " + photoFiles.getLast().getModifiedDateTime().toLocalDate());
+        System.out.println("Date range: " + photoFiles.getFirst().modifiedDateTime().toLocalDate() +
+                " to " + photoFiles.getLast().modifiedDateTime().toLocalDate());
 
         photoFiles.stream()
                 .collect(Collectors.groupingBy(
-                        p -> p.getModifiedDateTime().toLocalDate(),
+                        p -> p.modifiedDateTime().toLocalDate(),
                         Collectors.counting()
                 ))
                 .forEach((date, count) -> System.out.println(date + ": " + count + " photos"));
     }
 
     /**
-     * Represents a photo file on Android device.
-     */
-    public static class PhotoFile {
-        private final String filename;
-        private final String remotePath;
-        private final LocalDateTime modifiedDateTime;
-        private final long size;
-        private final String device;
-
-        public PhotoFile(String filename, String remotePath, LocalDateTime modifiedDateTime, long size, String device) {
-            this.filename = filename;
-            this.remotePath = remotePath;
-            this.modifiedDateTime = modifiedDateTime;
-            this.size = size;
-            this.device = device;
-        }
-
-        public String getFilename() {
-            return filename;
-        }
-
-        public String getRemotePath() {
-            return remotePath;
-        }
-
-        public LocalDateTime getModifiedDateTime() {
-            return modifiedDateTime;
-        }
-
-        public long getSize() {
-            return size;
-        }
-
-        public String getDevice() {
-            return device;
-        }
+         * Represents a photo file on Android device.
+         */
+        public record PhotoFile(String filename, String remotePath, LocalDateTime modifiedDateTime, long size, String device) {
 
         @Override
-        public String toString() {
-            return String.format("%s | %s | %d KB", filename, modifiedDateTime, size / 1024);
+            public String toString() {
+                return String.format("%s | %s | %d KB", filename, modifiedDateTime, size / 1024);
+            }
         }
-    }
 }

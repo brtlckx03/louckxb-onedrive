@@ -1,0 +1,100 @@
+╔═══════════════════════════════════════════════════════════════════╗
+║           OPENMTP + PHOTO UPLOADER - QUICK START                 ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+⏱️  5 MINUTE SETUP:
+
+1. EXPORT PHOTOS
+   ├─ Open OpenMTP app (already installed)
+   ├─ Click your phone
+   ├─ Navigate to: DCIM/Camera
+   ├─ Select all: Cmd+A
+   ├─ Right-click → Export
+   ├─ Save to: ~/Downloads/phone-photos/
+   └─ Wait for export to complete
+
+2. RUN APP
+   $ cd /Users/louckxb/Documents/wd-brtlckx/louckxb-onedrive
+   $ java -cp src ReadFilesOnPhone
+
+3. CHOOSE OPTION 2
+   When asked for path, choose:
+   → Option 2: Manual Mount Path
+   → Enter: ~/Downloads/phone-photos/
+
+4. FILTER & UPLOAD
+   ├─ Enter dates: 1/03/2026 till 3/03/2026
+   ├─ Review photos
+   └─ net.lckx.onedrive.Upload to OneDrive
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EXPORT SHORTCUTS:
+
+Terminal command to list exported photos:
+$ ls -lh ~/Downloads/phone-photos/ | head -10
+
+Count photos:
+$ ls -1 ~/Downloads/phone-photos/ | wc -l
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EXPORT FOLDER OPTIONS:
+
+Temporary (use once):
+  ~/Downloads/phone-photos/
+
+Permanent (archive):
+  ~/Pictures/phone-backup/
+  ~/Documents/android-photos/
+
+Custom folder:
+  /Volumes/[external-drive]/photos/
+  ~/backup/phone-2026/
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TROUBLESHOOTING:
+
+Problem: Photos not exporting from OpenMTP
+Solution: Make sure phone is connected & unlocked in OpenMTP
+
+Problem: Can't find export folder
+Solution: Use full path: /Users/louckxb/Downloads/phone-photos/
+          (not just ~/Downloads/phone-photos/)
+
+Problem: App says folder empty
+Solution: Double-check export completed
+          Try: ls ~/Downloads/phone-photos/
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FULL PATH FORMAT:
+
+Don't use:  ~/Downloads/phone-photos/
+Use:        /Users/louckxb/Downloads/phone-photos/
+
+Or expand tilde first:
+$ echo ~/Downloads/phone-photos/
+(shows full path)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WORKFLOW:
+
+OpenMTP ────→ Export ────→ Our App ────→ Filter ────→ net.lckx.onedrive.Upload
+(see files)  (copy)      (organize)   (by date)  (to OneDrive)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+READY? START HERE:
+
+1. Open OpenMTP
+2. Export to ~/Downloads/phone-photos/
+3. Run: java -cp src ReadFilesOnPhone
+4. Choose manual path option
+5. Done! 🎉
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For detailed guide: see OPENMTP_SETUP.md

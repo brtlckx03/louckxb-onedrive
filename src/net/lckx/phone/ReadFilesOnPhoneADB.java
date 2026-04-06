@@ -163,14 +163,14 @@ public class ReadFilesOnPhoneADB {
 
         System.out.println("Total: " + photos.size() + " photos\n");
 
-        long totalSize = photos.stream().mapToLong(AndroidPhone.PhotoFile::getSize).sum();
+        long totalSize = photos.stream().mapToLong(AndroidPhone.PhotoFile::size).sum();
         System.out.println("Total Size: " + formatFileSize(totalSize) + "\n");
 
         LocalDate currentDate = null;
         int fileIndex = 1;
 
         for (AndroidPhone.PhotoFile photo : photos) {
-            LocalDate photoDate = photo.getModifiedDateTime().toLocalDate();
+            LocalDate photoDate = photo.modifiedDateTime().toLocalDate();
 
             if (currentDate == null || !currentDate.equals(photoDate)) {
                 if (currentDate != null) {
@@ -182,9 +182,9 @@ public class ReadFilesOnPhoneADB {
 
             System.out.printf("     [%3d] %-40s  %8s  %s%n",
                     fileIndex,
-                    truncateFilename(photo.getFilename(), 40),
-                    formatFileSize(photo.getSize()),
-                    photo.getModifiedDateTime().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                    truncateFilename(photo.filename(), 40),
+                    formatFileSize(photo.size()),
+                    photo.modifiedDateTime().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
             );
 
             fileIndex++;
@@ -234,7 +234,7 @@ public class ReadFilesOnPhoneADB {
 
         System.out.println("\n📁 Destination: " + folderPath);
         System.out.println("📸 Photos to download: " + photos.size());
-        long totalSize = photos.stream().mapToLong(AndroidPhone.PhotoFile::getSize).sum();
+        long totalSize = photos.stream().mapToLong(AndroidPhone.PhotoFile::size).sum();
         System.out.println("💾 Total size: " + formatFileSize(totalSize));
 
         System.out.print("\nProceed with download? (yes/no): ");
@@ -259,21 +259,21 @@ public class ReadFilesOnPhoneADB {
             int successCount = 0;
             for (int i = 0; i < photos.size(); i++) {
                 AndroidPhone.PhotoFile photo = photos.get(i);
-                String localPath = localFolder + photo.getFilename();
+                String localPath = localFolder + photo.filename();
 
                 try {
-                    ProcessBuilder pb = new ProcessBuilder("adb", "-s", photo.getDevice(),
-                            "pull", photo.getRemotePath(), localPath);
+                    ProcessBuilder pb = new ProcessBuilder("adb", "-s", photo.device(),
+                            "pull", photo.remotePath(), localPath);
                     int exitCode = pb.start().waitFor();
 
                     if (exitCode == 0) {
-                        System.out.printf("  [%d/%d] Downloaded: %s\n", i + 1, photos.size(), photo.getFilename());
+                        System.out.printf("  [%d/%d] Downloaded: %s\n", i + 1, photos.size(), photo.filename());
                         successCount++;
                     } else {
-                        System.err.printf("  [%d/%d] Failed: %s\n", i + 1, photos.size(), photo.getFilename());
+                        System.err.printf("  [%d/%d] Failed: %s\n", i + 1, photos.size(), photo.filename());
                     }
                 } catch (Exception e) {
-                    System.err.printf("  [%d/%d] Error: %s\n", i + 1, photos.size(), photo.getFilename());
+                    System.err.printf("  [%d/%d] Error: %s\n", i + 1, photos.size(), photo.filename());
                 }
             }
 
