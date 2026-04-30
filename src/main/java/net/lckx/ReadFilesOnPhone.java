@@ -1,4 +1,4 @@
-/**
+package net.lckx; /**
  * Main entry point for reading and filtering files from Samsung phone by date.
  * Interactive prompt asks user for date(s) and displays matching photo files.
  * Includes diagnostic tools to find connected phones.
@@ -59,11 +59,11 @@ public class ReadFilesOnPhone {
                 System.out.println("1. Run diagnostics to find the phone");
                 System.out.println("2. Manually enter the phone mount path");
                 System.out.println("3. View troubleshooting guide");
-                
+
                 Scanner scanner = new Scanner(System.in);
                 System.out.print("\nChoose an option (1-3): ");
                 String choice = scanner.nextLine().trim();
-                
+
                 if (choice.equals("1")) {
                     runDiagnostics(scanner);
                 } else if (choice.equals("2")) {
@@ -448,7 +448,7 @@ public class ReadFilesOnPhone {
 
             String diskLine;
             while ((diskLine = pbReader.readLine()) != null) {
-                if (diskLine.toLowerCase().contains("external") || 
+                if (diskLine.toLowerCase().contains("external") ||
                     diskLine.toLowerCase().contains("removable")) {
                     System.out.println("  Removable device: " + diskLine.trim());
                     foundUsb = true;

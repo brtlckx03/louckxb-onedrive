@@ -6,7 +6,26 @@ via the [Microsoft Graph API](https://learn.microsoft.com/en-us/graph/overview).
 ## Prerequisites
 
 - **Java 21+** (uses unnamed classes / preview features)
+- **Maven 3.9+** (optional, for building)
 - A **personal Microsoft account** with OneDrive
+
+## Build Instructions
+
+### Using Maven
+
+```bash
+mvn clean package
+```
+
+This creates a JAR file in `target/louckxb-onedrive-1.0-SNAPSHOT.jar`.
+
+### Direct Execution with Java
+
+Each tool can be run directly with Java's preview mode. For example, to run the **SearchAndDownload** tool:
+
+```bash
+java --enable-preview --source 21 src/main/java/net/lckx/onedrive/SearchAndDownload.java
+```
 
 ## Authentication
 
@@ -123,10 +142,23 @@ Total OneDrive usage: 42.3 GB
 ## Project structure
 
 ```
-src/
-├── net.lckx.onedrive.SearchAndDownload.java      # Interactive browser & downloader
-├── net.lckx.onedrive.FindBiggestFolders.java     # Folder size analyzer
-└── net.lckx.onedrive.OneDriveHelpersTest.java    # Unit tests for shared helper methods
+louckxb-onedrive/
+├── pom.xml                                          # Maven configuration
+├── src/
+│   ├── main/java/net/lckx/
+│   │   ├── onedrive/
+│   │   │   ├── SearchAndDownload.java              # Interactive browser & downloader
+│   │   │   ├── FindBiggestFolders.java             # Folder size analyzer
+│   │   │   └── Upload.java                         # Upload files to OneDrive
+│   │   └── phone/
+│   │       ├── AndroidPhone.java                   # Phone model
+│   │       └── ReadFilesOnPhoneADB.java            # ADB integration
+│   ├── cli-tests/                                   # Standalone CLI tests
+│   │   ├── OneDriveHelpersTest.java                # Tests for shared helper methods
+│   │   ├── UploadPathTransformTest.java            # Tests for path transformation
+│   │   └── AndroidPhoneTest.java                   # Tests for phone integration
+│   └── main/resources/                              # Resource files (if needed)
+└── target/                                          # Build output (created by Maven)
 ```
 
 ## Shared internals
@@ -144,6 +176,26 @@ Both applications include the same set of helper methods (no external dependenci
 ## Security notes
 
 - Uses Microsoft's public client ID (`14d82eec...`) for the device code flow — suitable for personal use.
-- Only the **refresh token** is stored on disk (`~/.onedrive-token`). Access tokens are kept in memory only.
+- Only the **refresh token** is stored on disk (`~/.onedrive-token` for read, `~/.onedrive-rw-token` for uploads). Access tokens are kept in memory only.
 - All communication uses **HTTPS/TLS**.
-- Scope is **read-only** (`Files.Read`).
+- Scopes: **read-only** (`Files.Read`) for browsing/downloading, **read-write** (`Files.ReadWrite`) for uploads.
+
+## Testing
+
+### CLI Tests
+
+Standalone test files in `src/cli-tests/` can be run directly with Java:
+
+```bash
+# OneDrive helpers test
+java --enable-preview --source 21 src/cli-tests/OneDriveHelpersTest.java
+
+# Upload path transformation test
+java --enable-preview --source 21 src/cli-tests/UploadPathTransformTest.java
+
+# Android phone test
+java --enable-preview --source 21 src/cli-tests/AndroidPhoneTest.java
+```
+
+These tests use Java 21's unnamed classes feature for streamlined test code without external test frameworks.
+

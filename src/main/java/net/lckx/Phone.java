@@ -1,3 +1,5 @@
+package net.lckx;
+
 /**
  * Reads and filters photo files from a Samsung phone connected to Mac.
  * Detects the phone via USB connection with comprehensive diagnostics.

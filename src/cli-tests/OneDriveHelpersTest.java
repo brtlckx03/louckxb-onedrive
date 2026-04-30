@@ -1,9 +1,15 @@
 /**
  * Unit tests for the shared helper methods used by SearchAndDownload and FindBiggestFolders.
- * Run with:  java --enable-preview src/net.lckx.onedrive.OneDriveHelpersTest.java
+ * Run with:  java --enable-preview --source 21 src/cli-tests/OneDriveHelpersTest.java
  * <p>
  * User: louckxb, Date: 29/03/2026.
  */
+
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
 
 private int passed = 0;
 private int failed = 0;
