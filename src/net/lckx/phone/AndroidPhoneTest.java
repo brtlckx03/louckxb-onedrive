@@ -151,10 +151,10 @@ public class AndroidPhoneTest {
             }
 
             List<AndroidPhone.PhotoFile> allPhotos = phone.getAllPhotos();
-            LocalDate startDate = allPhotos.get(0).modifiedDateTime().toLocalDate();
+            LocalDate startDate = allPhotos.getFirst().modifiedDateTime().toLocalDate();
             LocalDate endDate = startDate.plusDays(7); // 7-day range
 
-            System.out.println("Testing range: " + startDate + " to " + endDate + "\n");
+            System.out.println("Testing range: " + startDate + " till " + endDate + "\n");
 
             List<AndroidPhone.PhotoFile> rangePhotos = phone.getPhotosByDateRange(startDate, endDate);
             System.out.println("✓ Found " + rangePhotos.size() + " photos in date range");

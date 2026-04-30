@@ -62,7 +62,7 @@ public class AndroidPhone {
                     headerPassed = true;
                     continue;
                 }
-                if (headerPassed && !line.isEmpty() && line.contains("device")) {
+                if (headerPassed && line.contains("device")) {
                     String device = line.split("\\s+")[0];
                     if (!device.isEmpty() && !device.equals("emulator-5554")) {
                         devices.add(device);
@@ -92,14 +92,14 @@ public class AndroidPhone {
 
         // Try common photo directories (in order of preference)
         String[] photoDirs = {
-                "/sdcard/DCIM/Camera",
-                "/sdcard/SdCardBackUp/DCIM/Camera",
+//                "/sdcard/DCIM/Camera",
+//                "/sdcard/SdCardBackUp/DCIM/Camera",
                 "/sdcard/WhatsApp/Media/WhatsApp Images",
-                "/sdcard/DCIM",
-                "/sdcard/Pictures",
-                "/sdcard/WhatsApp/Media/WhatsApp Video",
-                "/storage/emulated/0/DCIM/Camera",
-                "/storage/emulated/0/Pictures"
+//                "/sdcard/DCIM",
+//                "/sdcard/Pictures",
+//                "/sdcard/WhatsApp/Media/WhatsApp Video",
+//                "/storage/emulated/0/DCIM/Camera",
+//                "/storage/emulated/0/Pictures"
         };
 
         //2013-07-16
@@ -353,7 +353,7 @@ public class AndroidPhone {
         System.out.println("\n=== Photo Summary ===");
         System.out.println("Total photos: " + photoFiles.size());
         System.out.println("Date range: " + photoFiles.getFirst().modifiedDateTime().toLocalDate() +
-                " to " + photoFiles.getLast().modifiedDateTime().toLocalDate());
+                " till " + photoFiles.getLast().modifiedDateTime().toLocalDate());
 
         photoFiles.stream()
                 .collect(Collectors.groupingBy(

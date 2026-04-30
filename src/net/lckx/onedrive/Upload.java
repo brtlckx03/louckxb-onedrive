@@ -48,58 +48,69 @@ void main() throws Exception {
     String accessToken = authenticate(client);
     if (accessToken == null) return;
 
-    // Step 2: Ask for local folder
-    System.out.printf("Local folder to upload [%s]: ", DEFAULT_CAMERA);
-    String localInput = scanner.nextLine().trim();
-    Path localFolder = localInput.isEmpty() ? DEFAULT_CAMERA :
-            Path.of(localInput.contains("/") ? localInput : DEFAULT_CAMERA + "/" + localInput);
-    if (!Files.isDirectory(localFolder)) {
-        System.out.println("❌ Not a valid local folder: " + localFolder);
-        return;
-    }
+    // Step 2+: Loop — ask for a folder, upload, then ask again
+    while (true) {
+        // Refresh token before each upload to avoid expiry mid-session
+        accessToken = authenticate(client);
+        if (accessToken == null) return;
 
-    // Step 3: Ask for OneDrive destination
-    String folderName = localFolder.getFileName().toString();
-    String prefix = folderName.length() >= 4 ? folderName.substring(0, 4) : "";
-    String suggestedRemote = prefix.matches("\\d{4}") ? prefix + "/" + folderName : folderName;
-    System.out.printf("OneDrive destination [%s]: ", suggestedRemote);
-    String remoteInput = scanner.nextLine().trim();
-    String remotePath = remoteInput.isEmpty() ? suggestedRemote : remoteInput;
+        System.out.printf("Local folder to upload [%s]: ", DEFAULT_CAMERA);
+        String localInput = scanner.nextLine().trim();
+        if (localInput.equalsIgnoreCase("q") || localInput.equalsIgnoreCase("quit")) break;
+        Path localFolder = localInput.isEmpty() ? DEFAULT_CAMERA :
+                Path.of(localInput.contains("/") ? localInput : DEFAULT_CAMERA + "/" + localInput);
+        if (!Files.isDirectory(localFolder)) {
+            System.out.println("❌ Not a valid local folder: " + localFolder);
+            continue;
+        }
 
-    // Step 4: Count files to upload
-    System.out.print("  Counting files...");
-    List<Path> allFiles = new ArrayList<>();
-    collectFiles(localFolder, allFiles);
-    System.out.printf("\r  Found %d files to upload%n", allFiles.size());
+        // Ask for OneDrive destination
+        String folderName = localFolder.getFileName().toString();
+        String prefix = folderName.length() >= 4 ? folderName.substring(0, 4) : "";
+        String suggestedRemote = prefix.matches("\\d{4}") ? prefix + "/" + folderName : folderName;
+        System.out.printf("OneDrive destination [%s]: ", suggestedRemote);
+        String remoteInput = scanner.nextLine().trim();
+        String remotePath = remoteInput.isEmpty() ? suggestedRemote : remoteInput;
 
-    System.out.printf("net.lckx.onedrive.Upload \"%s\" → OneDrive: \"%s\"%n", localFolder, remotePath);
-    System.out.print("Proceed? [Y/n]: ");
-    String confirm = scanner.nextLine().trim();
-    if (!confirm.isEmpty() && !confirm.equalsIgnoreCase("y")) return;
+        // Count files to upload
+        System.out.print("  Counting files...");
+        List<Path> allFiles = new ArrayList<>();
+        collectFiles(localFolder, allFiles);
+        System.out.printf("\r  Found %d files to upload%n", allFiles.size());
 
-    // Step 5: net.lckx.onedrive.Upload
-    long startTime = System.currentTimeMillis();
-    int[] counters = {0, allFiles.size()}; // [done, total]
-    uploadFolder(client, accessToken, localFolder, remotePath, startTime, counters);
+        System.out.printf("Upload \"%s\" → OneDrive: \"%s\"%n", localFolder, remotePath);
+        System.out.print("Proceed? [Y/n]: ");
+        String confirm = scanner.nextLine().trim();
+        if (!confirm.isEmpty() && !confirm.equalsIgnoreCase("y")) continue;
 
-    long elapsed = System.currentTimeMillis() - startTime;
-    System.out.printf("%n  ✅ net.lckx.onedrive.Upload complete — %d files in %s%n", counters[0], formatDuration(elapsed));
+        // Upload
+        long startTime = System.currentTimeMillis();
+        int[] counters = {0, allFiles.size()}; // [done, total]
+        long[] totalBytes = {0};
+        uploadFolder(client, accessToken, localFolder, remotePath, startTime, counters, totalBytes);
 
-    // Move the uploaded folder to the local archive (same year-prefix logic as remote path)
-    String folderNameStr = localFolder.getFileName().toString();
-    String yearPrefix = folderNameStr.length() >= 4 ? folderNameStr.substring(0, 4) : "";
-    Path archiveDir = yearPrefix.matches("\\d{4}") ? ARCHIVE_BASE.resolve(yearPrefix) : ARCHIVE_BASE;
-    Path archiveTarget = archiveDir.resolve(localFolder.getFileName());
-    Files.createDirectories(archiveDir);
-    if (Files.exists(archiveTarget)) {
-        System.out.printf("  ⚠️  Archive target already exists, skipping move: %s%n", archiveTarget);
-    } else {
-        Files.move(localFolder, archiveTarget);
-        System.out.printf("  📦 Moved to: %s%n", archiveTarget);
+        long elapsed = System.currentTimeMillis() - startTime;
+        System.out.printf("%n  ✅ Upload complete — %d files (%s) in %s%n",
+                counters[0], formatSize(totalBytes[0]), formatDuration(elapsed));
+
+        // Move the uploaded folder to the local archive
+        String folderNameStr = localFolder.getFileName().toString();
+        String yearPrefix = folderNameStr.length() >= 4 ? folderNameStr.substring(0, 4) : "";
+        Path archiveDir = yearPrefix.matches("\\d{4}") ? ARCHIVE_BASE.resolve(yearPrefix) : ARCHIVE_BASE;
+        Path archiveTarget = archiveDir.resolve(localFolder.getFileName());
+        Files.createDirectories(archiveDir);
+        if (Files.exists(archiveTarget)) {
+            System.out.printf("  ⚠️  Archive target already exists, skipping move: %s%n", archiveTarget);
+        } else {
+            Files.move(localFolder, archiveTarget);
+            System.out.printf("  📦 Moved to: %s%n", archiveTarget);
+        }
+
+        System.out.println();
     }
 }
 
-// --- net.lckx.onedrive.Upload logic ---
+// --- Upload logic ---
 
 /**
  * Recursively collects all files under a directory.
@@ -117,7 +128,7 @@ void collectFiles(Path dir, List<Path> result) throws IOException {
  * Recursively uploads a local directory to a OneDrive path.
  */
 void uploadFolder(HttpClient client, String accessToken, Path localDir,
-                  String remotePath, long startTime, int[] counters) throws Exception {
+                  String remotePath, long startTime, int[] counters, long[] totalBytes) throws Exception {
 
     ensureFolder(client, accessToken, remotePath);
 
@@ -129,7 +140,7 @@ void uploadFolder(HttpClient client, String accessToken, Path localDir,
             if (Files.isDirectory(entry)) {
                 long elapsed = System.currentTimeMillis() - startTime;
                 System.out.printf("  📁 %s  [%s elapsed]%n", entryRemotePath, formatDuration(elapsed));
-                uploadFolder(client, accessToken, entry, entryRemotePath, startTime, counters);
+                uploadFolder(client, accessToken, entry, entryRemotePath, startTime, counters, totalBytes);
             } else {
                 counters[0]++;
                 long fileSize = Files.size(entry);
@@ -151,6 +162,7 @@ void uploadFolder(HttpClient client, String accessToken, Path localDir,
                     } else {
                         uploadLarge(client, accessToken, entry, entryRemotePath, fileSize, startTime, counters);
                     }
+                    totalBytes[0] += fileSize;
                     System.out.println(" ✓");
                 } catch (Exception e) {
                     System.out.println(" ❌ " + e.getMessage());
@@ -229,7 +241,7 @@ void uploadLarge(HttpClient client, String accessToken, Path file,
     if (sessionResp.contains("\"error\"")) throw new Exception(jsonString(sessionResp, "message"));
     String uploadUrl = jsonString(sessionResp, "uploadUrl");
 
-    // net.lckx.onedrive.Upload in chunks
+    // Upload in chunks
     try (InputStream in = Files.newInputStream(file)) {
         long uploaded = 0;
         byte[] buffer = new byte[CHUNK_SIZE];
@@ -250,8 +262,8 @@ void uploadLarge(HttpClient client, String accessToken, Path file,
             uploaded += bytesRead;
             int pct = (int) (uploaded * 100 / fileSize);
             long elapsed = System.currentTimeMillis() - startTime;
-            System.out.printf("\r  ⬆️  [%d/%d] %s — %d%% DONE  [%s elapsed]",
-                    counters[0], counters[1], file.getFileName(), pct, formatDuration(elapsed));
+            System.out.printf("\r  ⬆️  [%d/%d] %s (%s) — %d%% DONE  [%s elapsed]",
+                    counters[0], counters[1], file.getFileName(), formatSize(fileSize), pct, formatDuration(elapsed));
         }
     }
 }
