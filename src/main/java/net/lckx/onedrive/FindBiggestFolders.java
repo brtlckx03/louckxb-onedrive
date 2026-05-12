@@ -1,12 +1,5 @@
 package net.lckx.onedrive;
 
-/**
- * Scans all folders in a OneDrive account and displays the top 200 largest
- * folders by total size. Uses the same authentication as Main.java
- * (device code flow with token caching in ~/.onedrive-token).
- *
- * User: louckxb, Date: 29/03/2026.
- */
 
 import java.io.IOException;
 import java.net.URI;
@@ -23,6 +16,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
+/**
+ * Scans all folders in a OneDrive account and displays the top 200 largest
+ * folders by total size. Uses the same authentication as Main.java
+ * (device code flow with token caching in ~/.onedrive-token).
+ *
+ * User: louckxb, Date: 29/03/2026.
+ */
 public class FindBiggestFolders {
 
     private static final String CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";

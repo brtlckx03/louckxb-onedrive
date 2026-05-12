@@ -1,12 +1,5 @@
 package net.lckx;
 
-/**
- * Reads and filters photo files from a Samsung phone connected to Mac.
- * Detects the phone via USB connection with comprehensive diagnostics.
- * Allows filtering photos by date range and retrieving file metadata.
- * User: louckxb, Date: 03/04/2026.
- */
-
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -21,12 +14,17 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * Reads and filters photo files from a Samsung phone connected to Mac.
+ * Detects the phone via USB connection with comprehensive diagnostics.
+ * Allows filtering photos by date range and retrieving file metadata.
+ * User: louckxb, Date: 03/04/2026.
+ */
 public class Phone {
     private static final String[] PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".heic", ".raw"};
     private static final String[] ANDROID_DIRS = {"DCIM", "Pictures", "Cameras", "Download", "MediaStore"};
-
+    private final List<PhotoFile> photoFiles;
     private Path phoneMountPath;
-    private List<PhotoFile> photoFiles;
 
     /**
      * Attempts to auto-detect Samsung phone connection.
@@ -91,7 +89,7 @@ public class Phone {
             throw new IOException("Phone not connected or detected.");
         }
         loadPhotosRecursive(phoneMountPath);
-        photoFiles.sort(Comparator.comparing(PhotoFile::getModifiedDateTime));
+        photoFiles.sort(Comparator.comparing(PhotoFile::modifiedDateTime));
         System.out.println("✓ Loaded " + photoFiles.size() + " photos from phone");
     }
 
@@ -136,14 +134,14 @@ public class Phone {
 
     public List<PhotoFile> getPhotosByDate(LocalDate date) {
         return photoFiles.stream()
-                .filter(p -> p.getModifiedDateTime().toLocalDate().equals(date))
+                .filter(p -> p.modifiedDateTime().toLocalDate().equals(date))
                 .collect(Collectors.toList());
     }
 
     public List<PhotoFile> getPhotosByDateRange(LocalDate startDate, LocalDate endDate) {
         return photoFiles.stream()
                 .filter(p -> {
-                    LocalDate photoDate = p.getModifiedDateTime().toLocalDate();
+                    LocalDate photoDate = p.modifiedDateTime().toLocalDate();
                     return !photoDate.isBefore(startDate) && !photoDate.isAfter(endDate);
                 })
                 .collect(Collectors.toList());
@@ -152,7 +150,7 @@ public class Phone {
     public List<PhotoFile> getPhotosByYearMonth(int year, int month) {
         return photoFiles.stream()
                 .filter(p -> {
-                    LocalDateTime dt = p.getModifiedDateTime();
+                    LocalDateTime dt = p.modifiedDateTime();
                     return dt.getYear() == year && dt.getMonthValue() == month;
                 })
                 .collect(Collectors.toList());
@@ -160,7 +158,7 @@ public class Phone {
 
     public List<PhotoFile> getPhotosByYear(int year) {
         return photoFiles.stream()
-                .filter(p -> p.getModifiedDateTime().getYear() == year)
+                .filter(p -> p.modifiedDateTime().getYear() == year)
                 .collect(Collectors.toList());
     }
 
@@ -184,12 +182,12 @@ public class Phone {
 
         System.out.println("\n=== Photo Summary ===");
         System.out.println("Total photos: " + photoFiles.size());
-        System.out.println("Date range: " + photoFiles.get(0).getModifiedDateTime().toLocalDate() +
-                " to " + photoFiles.get(photoFiles.size() - 1).getModifiedDateTime().toLocalDate());
+        System.out.println("Date range: " + photoFiles.get(0).modifiedDateTime().toLocalDate() +
+                " to " + photoFiles.get(photoFiles.size() - 1).modifiedDateTime().toLocalDate());
 
         photoFiles.stream()
                 .collect(Collectors.groupingBy(
-                        p -> p.getModifiedDateTime().toLocalDate(),
+                        p -> p.modifiedDateTime().toLocalDate(),
                         Collectors.counting()
                 ))
                 .forEach((date, count) -> System.out.println(date + ": " + count + " photos"));
@@ -198,28 +196,7 @@ public class Phone {
     /**
      * Represents a photo file with metadata.
      */
-    public static class PhotoFile {
-        private final Path path;
-        private final LocalDateTime modifiedDateTime;
-        private final long size;
-
-        public PhotoFile(Path path, LocalDateTime modifiedDateTime, long size) {
-            this.path = path;
-            this.modifiedDateTime = modifiedDateTime;
-            this.size = size;
-        }
-
-        public Path getPath() {
-            return path;
-        }
-
-        public LocalDateTime getModifiedDateTime() {
-            return modifiedDateTime;
-        }
-
-        public long getSize() {
-            return size;
-        }
+    public record PhotoFile(Path path, LocalDateTime modifiedDateTime, long size) {
 
         public String getFilename() {
             return path.getFileName().toString();

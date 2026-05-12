@@ -1,8 +1,4 @@
-package net.lckx.phone; /**
- * Main entry point for reading and filtering files from Samsung phone via ADB.
- * Direct connection via Android Debug Bridge - no manual export needed.
- * User: louckxb, Date: 03/04/2026.
- */
+package net.lckx.phone;
 
 import java.io.IOException;
 import java.time.LocalDate;
@@ -11,6 +7,11 @@ import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Scanner;
 
+/**
+ * Main entry point for reading and filtering files from Samsung phone via ADB.
+ * Direct connection via Android Debug Bridge - no manual export needed.
+ * User: louckxb, Date: 03/04/2026.
+ */
 public class ReadFilesOnPhoneADB {
 
     private static final DateTimeFormatter[] DATE_FORMATS = {
@@ -19,7 +20,9 @@ public class ReadFilesOnPhoneADB {
             DateTimeFormatter.ofPattern("yyyy-MM-dd")
     };
 
-    public static void main(String[] args) {
+    private static String adbCommand;
+
+    static void main(String[] args) {
         try {
             System.out.println("╔════════════════════════════════════════════╗");
             System.out.println("║   Samsung Phone - Direct ADB Connection    ║");
@@ -27,6 +30,7 @@ public class ReadFilesOnPhoneADB {
 
             System.out.println("🔗 Connecting to Samsung phone via ADB...");
             AndroidPhone phone = new AndroidPhone();
+            adbCommand = phone.getAdbCommand();
 
             System.out.println("📱 Loading photos from phone...");
             phone.loadPhotos();
@@ -262,7 +266,7 @@ public class ReadFilesOnPhoneADB {
                 String localPath = localFolder + photo.filename();
 
                 try {
-                    ProcessBuilder pb = new ProcessBuilder("adb", "-s", photo.device(),
+                    ProcessBuilder pb = new ProcessBuilder(adbCommand, "-s", photo.device(),
                             "pull", photo.remotePath(), localPath);
                     int exitCode = pb.start().waitFor();
 

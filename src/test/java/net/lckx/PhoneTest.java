@@ -41,7 +41,7 @@ class PhoneTest {
         if (phone.getPhotoCount() == 0) return;
 
         List<Phone.PhotoFile> allPhotos = phone.getAllPhotos();
-        LocalDate sampleDate = allPhotos.get(0).getModifiedDateTime().toLocalDate();
+        LocalDate sampleDate = allPhotos.get(0).modifiedDateTime().toLocalDate();
         List<Phone.PhotoFile> filtered = phone.getPhotosByDate(sampleDate);
         assertNotNull(filtered);
     }

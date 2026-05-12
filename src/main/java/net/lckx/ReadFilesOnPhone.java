@@ -1,9 +1,4 @@
-package net.lckx; /**
- * Main entry point for reading and filtering files from Samsung phone by date.
- * Interactive prompt asks user for date(s) and displays matching photo files.
- * Includes diagnostic tools to find connected phones.
- * User: louckxb, Date: 03/04/2026.
- */
+package net.lckx;
 
 import java.io.IOException;
 import java.time.LocalDate;
@@ -12,6 +7,12 @@ import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Scanner;
 
+/**
+ * Main entry point for reading and filtering files from Samsung phone by date.
+ * Interactive prompt asks user for date(s) and displays matching photo files.
+ * Includes diagnostic tools to find connected phones.
+ * User: louckxb, Date: 03/04/2026.
+ */
 public class ReadFilesOnPhone {
 
     private static final DateTimeFormatter[] DATE_FORMATS = {
@@ -20,7 +21,7 @@ public class ReadFilesOnPhone {
             DateTimeFormatter.ofPattern("yyyy-MM-dd")
     };
 
-    public static void main(String[] args) {
+    static void main(String[] args) {
         try {
             System.out.println("╔════════════════════════════════════════════╗");
             System.out.println("║   Samsung Phone - Photo Gallery Reader     ║");
@@ -165,14 +166,14 @@ public class ReadFilesOnPhone {
 
         System.out.println("Total: " + photos.size() + " photos\n");
 
-        long totalSize = photos.stream().mapToLong(Phone.PhotoFile::getSize).sum();
+        long totalSize = photos.stream().mapToLong(Phone.PhotoFile::size).sum();
         System.out.println("Total Size: " + formatFileSize(totalSize) + "\n");
 
         LocalDate currentDate = null;
         int fileIndex = 1;
 
         for (Phone.PhotoFile photo : photos) {
-            LocalDate photoDate = photo.getModifiedDateTime().toLocalDate();
+            LocalDate photoDate = photo.modifiedDateTime().toLocalDate();
 
             if (currentDate == null || !currentDate.equals(photoDate)) {
                 if (currentDate != null) {
@@ -185,8 +186,8 @@ public class ReadFilesOnPhone {
             System.out.printf("     [%3d] %-40s  %8s  %s%n",
                     fileIndex,
                     truncateFilename(photo.getFilename(), 40),
-                    formatFileSize(photo.getSize()),
-                    photo.getModifiedDateTime().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                    formatFileSize(photo.size()),
+                    photo.modifiedDateTime().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
             );
 
             fileIndex++;
@@ -234,7 +235,7 @@ public class ReadFilesOnPhone {
 
         System.out.println("\n📁 Destination: " + folderName);
         System.out.println("📸 Photos to upload: " + photos.size());
-        long totalSize = photos.stream().mapToLong(Phone.PhotoFile::getSize).sum();
+        long totalSize = photos.stream().mapToLong(Phone.PhotoFile::size).sum();
         System.out.println("💾 Total size: " + formatFileSize(totalSize));
 
         System.out.print("\nProceed with upload? (yes/no): ");
@@ -263,7 +264,7 @@ public class ReadFilesOnPhone {
                 java.nio.file.Path tempFile = tempDir.resolve(photo.getFilename());
 
                 try {
-                    java.nio.file.Files.copy(photo.getPath(), tempFile,
+                    java.nio.file.Files.copy(photo.path(), tempFile,
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                     System.out.printf("  [%d/%d] Copied: %s\n", i + 1, photos.size(), photo.getFilename());
                 } catch (IOException e) {
@@ -350,7 +351,7 @@ public class ReadFilesOnPhone {
             java.nio.file.Path volumesPath = java.nio.file.Paths.get("/Volumes");
             if (java.nio.file.Files.exists(volumesPath)) {
                 try (java.nio.file.DirectoryStream<java.nio.file.Path> stream =
-                        java.nio.file.Files.newDirectoryStream(volumesPath)) {
+                             java.nio.file.Files.newDirectoryStream(volumesPath)) {
                     for (java.nio.file.Path volume : stream) {
                         String name = volume.getFileName().toString();
                         if (!name.equals("Macintosh HD")) {
@@ -379,7 +380,7 @@ public class ReadFilesOnPhone {
                 java.nio.file.Path path = java.nio.file.Paths.get(searchPath);
                 if (java.nio.file.Files.exists(path)) {
                     try (java.nio.file.DirectoryStream<java.nio.file.Path> stream =
-                            java.nio.file.Files.newDirectoryStream(path)) {
+                                 java.nio.file.Files.newDirectoryStream(path)) {
                         for (java.nio.file.Path entry : stream) {
                             if (java.nio.file.Files.isDirectory(entry)) {
                                 for (String androidDir : androidDirs) {
@@ -449,7 +450,7 @@ public class ReadFilesOnPhone {
             String diskLine;
             while ((diskLine = pbReader.readLine()) != null) {
                 if (diskLine.toLowerCase().contains("external") ||
-                    diskLine.toLowerCase().contains("removable")) {
+                        diskLine.toLowerCase().contains("removable")) {
                     System.out.println("  Removable device: " + diskLine.trim());
                     foundUsb = true;
                 }

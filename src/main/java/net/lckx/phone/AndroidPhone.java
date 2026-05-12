@@ -1,8 +1,4 @@
-package net.lckx.phone; /**
- * Reads and filters photo files directly from Android phone via ADB (Android Debug Bridge).
- * Connects to phone through USB without requiring manual export.
- * User: louckxb, Date: 03/04/2026.
- */
+package net.lckx.phone;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -16,33 +12,56 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * Reads and filters photo files directly from Android phone via ADB (Android Debug Bridge).
+ * Connects to phone through USB without requiring manual export.
+ * User: louckxb, Date: 03/04/2026.
+ */
 public class AndroidPhone {
-    private static final String[] PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".heic"};
-    private boolean adbAvailable = false;
+    private static final String[] MEDIA_EXTENSIONS = {
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".heic",
+            ".mp4", ".mov", ".avi", ".mkv", ".3gp", ".wmv", ".webm"
+    };
+    private static final String[] ADB_PATHS = {
+            "adb",
+            "/opt/homebrew/bin/adb",
+            "/usr/local/bin/adb",
+            System.getProperty("user.home") + "/Library/Android/sdk/platform-tools/adb"
+    };
     private final List<PhotoFile> photoFiles;
+    private String adbCommand = null;
     private long loadTimeMs = 0;
     private long filterTimeMs = 0;
 
     public AndroidPhone() throws IOException {
         this.photoFiles = new ArrayList<>();
-        checkAdbAvailable();
-        if (!adbAvailable) {
+        findAdb();
+        if (adbCommand == null) {
             throw new IOException("ADB not found. Please install Android SDK Platform Tools.");
         }
     }
 
     /**
-     * Checks if ADB is available on the system.
+     * Finds the ADB executable by checking common installation paths.
      */
-    private void checkAdbAvailable() {
-        try {
-            ProcessBuilder pb = new ProcessBuilder("adb", "version");
-            Process p = pb.start();
-            int exitCode = p.waitFor();
-            adbAvailable = (exitCode == 0);
-        } catch (Exception e) {
-            adbAvailable = false;
+    private void findAdb() {
+        for (String path : ADB_PATHS) {
+            try {
+                ProcessBuilder pb = new ProcessBuilder(path, "version");
+                Process p = pb.start();
+                int exitCode = p.waitFor();
+                if (exitCode == 0) {
+                    adbCommand = path;
+                    return;
+                }
+            } catch (Exception e) {
+                // Try next path
+            }
         }
+    }
+
+    public String getAdbCommand() {
+        return adbCommand;
     }
 
     /**
@@ -51,7 +70,7 @@ public class AndroidPhone {
     public List<String> getConnectedDevices() throws IOException {
         List<String> devices = new ArrayList<>();
         try {
-            ProcessBuilder pb = new ProcessBuilder("adb", "devices");
+            ProcessBuilder pb = new ProcessBuilder(adbCommand, "devices");
             BufferedReader reader = new BufferedReader(
                     new InputStreamReader(pb.start().getInputStream())
             );
@@ -90,35 +109,35 @@ public class AndroidPhone {
         String device = devices.getFirst();
         System.out.println("Connected to device: " + device);
 
-        // Try common photo directories (in order of preference)
-        String[] photoDirs = {
-//                "/sdcard/DCIM/Camera",
-//                "/sdcard/SdCardBackUp/DCIM/Camera",
+        // Try common photo/video/media directories (in order of preference)
+        String[] mediaDirs = {
+                "/sdcard/DCIM/Camera",
+                "/sdcard/SdCardBackUp/DCIM/Camera",
                 "/sdcard/WhatsApp/Media/WhatsApp Images",
-//                "/sdcard/DCIM",
-//                "/sdcard/Pictures",
-//                "/sdcard/WhatsApp/Media/WhatsApp Video",
-//                "/storage/emulated/0/DCIM/Camera",
-//                "/storage/emulated/0/Pictures"
+                "/sdcard/WhatsApp/Media/WhatsApp Video",
+                "/sdcard/WhatsApp/Media/WhatsApp Documents",
+                "/sdcard/WhatsApp/Media/WhatsApp Animated Gifs",
+                "/sdcard/Download",
+                "/sdcard/DCIM",
+                "/sdcard/Pictures",
+                "/storage/emulated/0/DCIM/Camera",
+                "/storage/emulated/0/Pictures",
+                "/storage/emulated/0/Download"
         };
 
         //2013-07-16
         //  [99/1252] Failed: 2016-04-22
         //  [100/1252] Downloaded: IMG_20160826_095031.jpg
-        for (String dir : photoDirs) {
+        for (String dir : mediaDirs) {
             try {
                 loadPhotosFromDirectory(device, dir);
-                if (!photoFiles.isEmpty()) {
-                    System.out.println("✓ Found " + photoFiles.size() + " photos in: " + dir);
-                    break;
-                }
             } catch (IOException e) {
-                // Try next directory
+                // Directory not found or not accessible, skip
             }
         }
 
         if (photoFiles.isEmpty()) {
-            throw new IOException("No photos found in DCIM or Pictures directories");
+            throw new IOException("No media files found in any directory");
         }
 
         photoFiles.sort(Comparator.comparing(PhotoFile::modifiedDateTime));
@@ -171,7 +190,7 @@ public class AndroidPhone {
         try {
             // Use ls -l to get all files with metadata in one command (non-recursive)
             // Quote directory path to handle spaces in directory names
-            ProcessBuilder pb = new ProcessBuilder("adb", "-s", device, "shell", "ls -l '" + dir + "'");
+            ProcessBuilder pb = new ProcessBuilder(adbCommand, "-s", device, "shell", "ls -l '" + dir + "'");
             Process process = pb.start();
             BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream())
@@ -188,7 +207,7 @@ public class AndroidPhone {
 
                 // Fast path: only process if line likely contains photo extension
                 String lowerLine = line.toLowerCase();
-                if (!isPhotoFile(lowerLine)) {
+                if (!isMediaFile(lowerLine)) {
                     continue;
                 }
 
@@ -267,11 +286,11 @@ public class AndroidPhone {
     }
 
     /**
-     * Checks if a line from ls output is a photo file.
+     * Checks if a line from ls output is a media file (photo or video).
      */
-    private boolean isPhotoFile(String line) {
+    private boolean isMediaFile(String line) {
         String lower = line.toLowerCase();
-        for (String ext : PHOTO_EXTENSIONS) {
+        for (String ext : MEDIA_EXTENSIONS) {
             if (lower.endsWith(ext)) {
                 return true;
             }
@@ -364,13 +383,13 @@ public class AndroidPhone {
     }
 
     /**
-         * Represents a photo file on Android device.
-         */
-        public record PhotoFile(String filename, String remotePath, LocalDateTime modifiedDateTime, long size, String device) {
+     * Represents a photo file on Android device.
+     */
+    public record PhotoFile(String filename, String remotePath, LocalDateTime modifiedDateTime, long size, String device) {
 
         @Override
-            public String toString() {
-                return String.format("%s | %s | %d KB", filename, modifiedDateTime, size / 1024);
-            }
+        public String toString() {
+            return String.format("%s | %s | %d KB", filename, modifiedDateTime, size / 1024);
         }
+    }
 }

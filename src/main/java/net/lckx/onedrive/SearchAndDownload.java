@@ -1,12 +1,5 @@
 package net.lckx.onedrive;
 
-/**
- * Browses a specific folder in a OneDrive account using the Microsoft Graph API.
- * Authenticates via the OAuth 2.0 device code flow with token caching so you
- * only need to sign in once (refresh token is stored in ~/.onedrive-token).
- * <p>
- * User: louckxb, Date: 29/03/2026.
- */
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,6 +18,13 @@ import java.util.Map;
 import java.util.Scanner;
 import java.util.regex.Pattern;
 
+/**
+ * Browses a specific folder in a OneDrive account using the Microsoft Graph API.
+ * Authenticates via the OAuth 2.0 device code flow with token caching so you
+ * only need to sign in once (refresh token is stored in ~/.onedrive-token).
+ * <p>
+ * User: louckxb, Date: 29/03/2026.
+ */
 public class SearchAndDownload {
 
     private static final String CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
