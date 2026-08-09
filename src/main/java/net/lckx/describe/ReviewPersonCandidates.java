@@ -1,4 +1,4 @@
-package net.lckx.video;
+package net.lckx.describe;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;

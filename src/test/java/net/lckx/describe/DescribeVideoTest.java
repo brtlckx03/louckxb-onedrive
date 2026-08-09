@@ -1,8 +1,9 @@
-package net.lckx.video;
+package net.lckx.describe;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,7 +22,7 @@ class DescribeVideoTest {
         DescribeVideo.Options options = DescribeVideo.parseOptions(new String[]{"holiday.mp4"}, null, null);
 
         assertEquals(Path.of("holiday.mp4"), options.videoPath());
-        assertEquals("llama3.2-vision", options.model());
+        assertEquals("qwen2.5vl:7b", options.model());
         assertEquals(URI.create("http://localhost:11434"), options.ollamaHost());
         assertEquals(8, options.frameCount());
         assertNull(options.sampleEverySeconds());
@@ -41,6 +42,10 @@ class DescribeVideoTest {
         assertEquals(Path.of(System.getProperty("user.dir"), "video-people").toAbsolutePath().normalize(), options.peopleDir());
         assertTrue(options.savePersonCandidates());
         assertEquals(8, options.maxPersonReferences());
+        assertEquals("auto", options.personRecognition());
+        assertEquals("python3", options.faceRecognitionPython());
+        assertTrue(options.faceRecognitionScript().endsWith(Path.of("src/main/python/net/lckx/video/face_recognize.py")));
+        assertEquals(0.6, options.faceRecognitionTolerance());
         assertNull(options.addPersonRequest());
         assertFalse(options.keepFrames());
         assertFalse(options.showFrameDetails());
@@ -63,6 +68,9 @@ class DescribeVideoTest {
                 "--people-dir", "~/video-person-library",
                 "--no-save-person-candidates",
                 "--max-person-refs=3",
+                "--person-recognition=face",
+                "--face-recognition-python", "~/face-venv/bin/python",
+                "--face-recognition-tolerance", "0.5",
                 "--keep-frames",
                 "--details",
                 "kids-at-beach.mp4"
@@ -89,6 +97,9 @@ class DescribeVideoTest {
         assertEquals(Path.of(System.getProperty("user.home"), "video-person-library"), options.peopleDir());
         assertFalse(options.savePersonCandidates());
         assertEquals(3, options.maxPersonReferences());
+        assertEquals("face", options.personRecognition());
+        assertEquals(Path.of(System.getProperty("user.home"), "face-venv/bin/python").toString(), options.faceRecognitionPython());
+        assertEquals(0.5, options.faceRecognitionTolerance());
         assertTrue(options.keepFrames());
         assertTrue(options.showFrameDetails());
     }
@@ -156,6 +167,23 @@ class DescribeVideoTest {
 
         assertFalse(options.transcribeSpeech());
         assertTrue(options.transcribeSpeechExplicit());
+    }
+
+    @Test
+    void parseOptions_noKnownPeopleKeepsCandidateSavingEnabled() {
+        DescribeVideo.Options options = DescribeVideo.parseOptions(new String[]{"--no-known-people", "clip.mp4"}, null, null);
+
+        assertEquals(0, options.maxPersonReferences());
+        assertEquals("off", options.personRecognition());
+        assertTrue(options.savePersonCandidates());
+    }
+
+    @Test
+    void parseOptions_rejectsInvalidPersonRecognitionOptions() {
+        assertThrows(DescribeVideo.UsageException.class,
+                () -> DescribeVideo.parseOptions(new String[]{"--person-recognition", "cloud", "clip.mp4"}, null, null));
+        assertThrows(DescribeVideo.UsageException.class,
+                () -> DescribeVideo.parseOptions(new String[]{"--face-recognition-tolerance", "2", "clip.mp4"}, null, null));
     }
 
     @Test
@@ -335,6 +363,22 @@ class DescribeVideoTest {
                 new DescribeVideo.KnownPersonReference("Miranda", secondReference),
                 new DescribeVideo.KnownPersonReference("Miranda", thirdReference)
         ), knownPeople.references());
+    }
+
+    @Test
+    void faceRecognitionParseMatchLine_readsNamesAndFaceCount() throws Exception {
+        DescribeVideo.FaceRecognitionResult result = DescribeVideo.FaceRecognitionServer.parseMatchLine("MATCH\t2\tLotte\tMiranda\tLotte");
+
+        assertEquals(2, result.faceCount());
+        assertEquals(List.of("Lotte", "Miranda"), result.names());
+        assertTrue(result.hasMatches());
+        assertEquals("Lotte, Miranda", result.namesText());
+    }
+
+    @Test
+    void faceRecognitionParseMatchLine_rejectsErrors() {
+        assertThrows(IOException.class,
+                () -> DescribeVideo.FaceRecognitionServer.parseMatchLine("ERROR\tpackage missing"));
     }
 
     @Test

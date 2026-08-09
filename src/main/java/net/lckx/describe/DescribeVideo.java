@@ -1,10 +1,12 @@
-package net.lckx.video;
+package net.lckx.describe;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.io.ByteArrayOutputStream;
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.awt.Color;
 import java.awt.Font;
 import java.awt.FontMetrics;
@@ -39,10 +41,10 @@ import javax.imageio.ImageIO;
  *
  * Requires:
  * - ffmpeg and ffprobe on PATH
- * - Ollama running locally with a vision model, for example: ollama pull llama3.2-vision
+ * - Ollama running locally with a vision model, for example: ollama pull qwen2.5vl:7b
  */
 public class DescribeVideo {
-    private static final String DEFAULT_MODEL = "llama3.2-vision";
+    private static final String DEFAULT_MODEL = "qwen2.5vl:7b";
     private static final String DEFAULT_HOST = "http://localhost:11434";
     private static final int DEFAULT_FRAME_COUNT = 8;
     private static final int MAX_FRAME_COUNT = 50;
@@ -64,6 +66,11 @@ public class DescribeVideo {
     private static final int DEFAULT_MAX_PERSON_REFERENCES = 8;
     private static final int MAX_PERSON_REFERENCES = 50;
     private static final int PERSON_REFERENCE_WIDTH = 384;
+    private static final String DEFAULT_PERSON_RECOGNITION = "auto";
+    private static final List<String> SUPPORTED_PERSON_RECOGNITION = List.of("auto", "face", "ollama", "off");
+    private static final String DEFAULT_FACE_RECOGNITION_PYTHON = "python3";
+    private static final double DEFAULT_FACE_RECOGNITION_TOLERANCE = 0.6;
+    private static final Path DEFAULT_FACE_RECOGNITION_SCRIPT = Path.of(System.getProperty("user.dir"), "src/main/python/net/lckx/video/face_recognize.py").toAbsolutePath().normalize();
     private static final Pattern GENERATED_PERSON_CANDIDATE = Pattern.compile("frame-\\d+-[0-9m]+s(?:-\\d+px)?", Pattern.CASE_INSENSITIVE);
     private static final Pattern KNOWN_PERSON_FRAME_SUFFIX = Pattern.compile("[_-](?:\\d+[-_])?[0-9m]+s(?:-\\d+px)?$", Pattern.CASE_INSENSITIVE);
 
@@ -77,6 +84,7 @@ public class DescribeVideo {
     int run(String[] args) {
         Path workDir = null;
         Options options = null;
+        PersonRecognitionPlan personRecognition = PersonRecognitionPlan.disabled();
 
         try {
             options = parseOptions(args);
@@ -116,6 +124,7 @@ public class DescribeVideo {
                     options.randomSeed() == null ? new Random() : new Random(options.randomSeed())
             );
             workDir = Files.createTempDirectory("video-description-");
+            personRecognition = preparePersonRecognition(options, knownPeople, workDir, timer);
 
             System.out.println();
             System.out.println("Video: " + options.videoPath().toAbsolutePath());
@@ -135,7 +144,9 @@ public class DescribeVideo {
             System.out.println("Model: " + options.model() + " via " + options.ollamaHost());
             if (!knownPeople.isEmpty()) {
                 System.out.println("Known people: " + knownPeople.names());
-                System.out.println("Known people comparison: enabled; this can make each frame analysis slower");
+                System.out.println("Known people recognition: " + personRecognition.description());
+            } else if (options.maxPersonReferences() == 0) {
+                System.out.println("Known people comparison: disabled");
             }
             if (options.savePersonCandidates()) {
                 System.out.println("Person candidate pictures: enabled");
@@ -156,7 +167,7 @@ public class DescribeVideo {
                         currentImageWidth,
                         options.autoTune(),
                         ollama,
-                        knownPeople,
+                        personRecognition,
                         timer
                 );
                 if (result != null) {
@@ -266,6 +277,11 @@ public class DescribeVideo {
             printSetupHelp();
             return 1;
         } finally {
+            try {
+                personRecognition.close();
+            } catch (IOException e) {
+                System.err.println("Warning: could not stop local face recognition helper: " + e.getMessage());
+            }
             if (workDir != null && (options == null || !options.keepFrames())) {
                 try {
                     deleteRecursively(workDir);
@@ -301,6 +317,10 @@ public class DescribeVideo {
         Path peopleDir = DEFAULT_PEOPLE_DIR;
         boolean savePersonCandidates = true;
         int maxPersonReferences = DEFAULT_MAX_PERSON_REFERENCES;
+        String personRecognition = DEFAULT_PERSON_RECOGNITION;
+        String faceRecognitionPython = DEFAULT_FACE_RECOGNITION_PYTHON;
+        Path faceRecognitionScript = DEFAULT_FACE_RECOGNITION_SCRIPT;
+        double faceRecognitionTolerance = DEFAULT_FACE_RECOGNITION_TOLERANCE;
         AddPersonRequest addPersonRequest = null;
         boolean keepFrames = false;
         boolean showFrameDetails = false;
@@ -398,6 +418,25 @@ public class DescribeVideo {
                 maxPersonReferences = parseBoundedInt(requireValue(args, ++i, "--max-person-refs"), "--max-person-refs", 0, MAX_PERSON_REFERENCES);
             } else if (arg.startsWith("--max-person-refs=")) {
                 maxPersonReferences = parseBoundedInt(valueAfterEquals(arg, "--max-person-refs"), "--max-person-refs", 0, MAX_PERSON_REFERENCES);
+            } else if (arg.equals("--no-known-people")) {
+                maxPersonReferences = 0;
+                personRecognition = "off";
+            } else if (arg.equals("--person-recognition")) {
+                personRecognition = requireValue(args, ++i, "--person-recognition").trim().toLowerCase(Locale.ROOT);
+            } else if (arg.startsWith("--person-recognition=")) {
+                personRecognition = valueAfterEquals(arg, "--person-recognition").trim().toLowerCase(Locale.ROOT);
+            } else if (arg.equals("--face-recognition-python")) {
+                faceRecognitionPython = expandHome(requireValue(args, ++i, "--face-recognition-python"));
+            } else if (arg.startsWith("--face-recognition-python=")) {
+                faceRecognitionPython = expandHome(valueAfterEquals(arg, "--face-recognition-python"));
+            } else if (arg.equals("--face-recognition-script")) {
+                faceRecognitionScript = expandHomePath(requireValue(args, ++i, "--face-recognition-script"));
+            } else if (arg.startsWith("--face-recognition-script=")) {
+                faceRecognitionScript = expandHomePath(valueAfterEquals(arg, "--face-recognition-script"));
+            } else if (arg.equals("--face-recognition-tolerance")) {
+                faceRecognitionTolerance = parseDouble(requireValue(args, ++i, "--face-recognition-tolerance"), "--face-recognition-tolerance", 0.1, 1.0);
+            } else if (arg.startsWith("--face-recognition-tolerance=")) {
+                faceRecognitionTolerance = parseDouble(valueAfterEquals(arg, "--face-recognition-tolerance"), "--face-recognition-tolerance", 0.1, 1.0);
             } else if (arg.equals("--add-person")) {
                 String name = requireValue(args, ++i, "--add-person");
                 Path imagePath = expandHomePath(requireValue(args, ++i, "--add-person image"));
@@ -433,6 +472,9 @@ public class DescribeVideo {
         if (!SUPPORTED_TRANSCRIBERS.contains(transcriber)) {
             throw new UsageException("--transcriber must be one of: " + String.join(", ", SUPPORTED_TRANSCRIBERS));
         }
+        if (!SUPPORTED_PERSON_RECOGNITION.contains(personRecognition)) {
+            throw new UsageException("--person-recognition must be one of: " + String.join(", ", SUPPORTED_PERSON_RECOGNITION));
+        }
         if (speechModel.isBlank()) {
             throw new UsageException("--speech-model cannot be empty.");
         }
@@ -446,6 +488,7 @@ public class DescribeVideo {
         return new Options(videoPath, model, host, frameCount, imageWidth, requestTimeout, frameCountExplicit,
                 imageWidthExplicit, autoTune, transcribeSpeech, transcribeSpeechExplicit, transcriber, speechModel, speechLanguage,
                 speechTimeout, peopleDir, savePersonCandidates, maxPersonReferences, addPersonRequest, sampleEverySeconds,
+                personRecognition, faceRecognitionPython, faceRecognitionScript, faceRecognitionTolerance,
                 randomSamples, randomSeed, keepFrames, showFrameDetails);
     }
 
@@ -527,6 +570,10 @@ public class DescribeVideo {
         return Path.of(value);
     }
 
+    private static String expandHome(String value) {
+        return expandHomePath(value).toString();
+    }
+
     private static int parseFrameCount(String value) {
         return parseBoundedInt(value, "--frames", 1, MAX_FRAME_COUNT);
     }
@@ -548,6 +595,18 @@ public class DescribeVideo {
             return Long.parseLong(value);
         } catch (NumberFormatException e) {
             throw new UsageException(option + " must be a whole number.");
+        }
+    }
+
+    private static double parseDouble(String value, String option, double min, double max) {
+        try {
+            double number = Double.parseDouble(value);
+            if (!Double.isFinite(number) || number < min || number > max) {
+                throw new UsageException(option + " must be between " + min + " and " + max + ".");
+            }
+            return number;
+        } catch (NumberFormatException e) {
+            throw new UsageException(option + " must be a number.");
         }
     }
 
@@ -802,7 +861,7 @@ public class DescribeVideo {
 
     private static FrameAnalysisResult analyzeFrame(Path videoPath, Path workDir, int frameIndex, int frameCount,
                                                     double seconds, int imageWidth, boolean autoTune,
-                                                    OllamaClient ollama, KnownPeople knownPeople,
+                                                    OllamaClient ollama, PersonRecognitionPlan personRecognition,
                                                     RunTimer timer) throws IOException, InterruptedException {
         int width = imageWidth;
 
@@ -820,7 +879,19 @@ public class DescribeVideo {
             timer.log("Analyzing frame %d/%d...".formatted(frameIndex, frameCount));
             long startedAt = System.nanoTime();
             try {
-                String observation = ollama.describeFrame(framePath, seconds, knownPeople);
+                FaceRecognitionResult faceRecognition = FaceRecognitionResult.empty();
+                if (personRecognition.faceRecognizer() != null) {
+                    long faceStartedAt = System.nanoTime();
+                    faceRecognition = personRecognition.faceRecognizer().recognize(framePath);
+                    timer.log("Local face recognition for frame %d/%d finished in %s%s.".formatted(
+                            frameIndex,
+                            frameCount,
+                            formatDuration(Duration.ofNanos(System.nanoTime() - faceStartedAt)),
+                            faceRecognition.hasMatches() ? "; matched " + faceRecognition.namesText() : ""
+                    ));
+                }
+
+                String observation = ollama.describeFrame(framePath, seconds, personRecognition.ollamaKnownPeople(), faceRecognition);
                 Duration elapsed = Duration.ofNanos(System.nanoTime() - startedAt);
                 timer.log("Analyzed frame %d/%d in %s.".formatted(frameIndex, frameCount, formatDuration(elapsed)));
                 int nextWidth = width;
@@ -1117,7 +1188,7 @@ public class DescribeVideo {
                   java --enable-preview src/main/java/net/lckx/video/DescribeVideo.java <video-file> [options]
 
                 Options:
-                  --model <name>       Ollama vision model to use. Default: llama3.2-vision
+                  --model <name>       Ollama vision model to use. Default: qwen2.5vl:7b
                   --host <url>         Ollama host. Default: http://localhost:11434
                   --frames <number>    Number of frames to sample. Auto-tuned by duration unless provided, max: 50
                   --sample-every-seconds <n>
@@ -1140,9 +1211,18 @@ public class DescribeVideo {
                   --add-person <name> <image>
                                        Add a reference picture for a known person, then exit
                   --max-person-refs <n>
-                                       Max known-person reference pictures sent to Ollama. Default: 8
+                                        Max known-person reference pictures sent to Ollama. Default: 8
+                  --no-known-people    Do not compare frames with known people; candidate pictures are still saved
+                  --person-recognition <mode>
+                                        Known-person method: auto, face, ollama, off. Default: auto
+                  --face-recognition-python <path>
+                                        Python executable for local face_recognition. Default: python3
+                  --face-recognition-script <path>
+                                        Helper script path. Default: src/main/python/net/lckx/video/face_recognize.py
+                  --face-recognition-tolerance <n>
+                                        Local face match threshold. Default: 0.6; lower is stricter
                   --save-person-candidates
-                                       Save sampled frames that appear to contain people. Enabled by default
+                                        Save sampled frames that appear to contain people. Enabled by default
                   --no-save-person-candidates
                                        Do not save candidate person pictures
                   --details            Print every sampled-frame observation after the final summary
@@ -1163,12 +1243,17 @@ public class DescribeVideo {
                 Setup:
                   brew install ffmpeg
                   brew install ollama
-                  ollama pull llama3.2-vision
+                  ollama pull qwen2.5vl:7b
                   ollama serve
 
                 Speech transcription setup:
                   pipx install openai-whisper
                   # or: brew install whisper-cpp and pass --speech-model /path/to/ggml-model.bin
+
+                Optional local face recognition setup:
+                  python3 -m venv ~/.venvs/video-face-recognition
+                  ~/.venvs/video-face-recognition/bin/pip install "setuptools<81" face_recognition
+                  # then pass --face-recognition-python ~/.venvs/video-face-recognition/bin/python
 
                 This tool describes visible video content from sampled frames. When no speech
                 option is passed, it asks whether to transcribe speech and defaults to yes.
@@ -1295,11 +1380,14 @@ public class DescribeVideo {
                    boolean frameCountExplicit, boolean imageWidthExplicit, boolean autoTune,
                    boolean transcribeSpeech, boolean transcribeSpeechExplicit, String transcriber, String speechModel, String speechLanguage, Duration speechTimeout,
                    Path peopleDir, boolean savePersonCandidates, int maxPersonReferences, AddPersonRequest addPersonRequest, Integer sampleEverySeconds,
+                   String personRecognition, String faceRecognitionPython, Path faceRecognitionScript, double faceRecognitionTolerance,
                    boolean randomSamples, Long randomSeed, boolean keepFrames, boolean showFrameDetails) {
         Options withTranscribeSpeech(boolean value) {
             return new Options(videoPath, model, ollamaHost, frameCount, imageWidth, requestTimeout, frameCountExplicit,
                     imageWidthExplicit, autoTune, value, true, transcriber, speechModel, speechLanguage, speechTimeout,
-                    peopleDir, savePersonCandidates, maxPersonReferences, addPersonRequest, sampleEverySeconds, randomSamples, randomSeed, keepFrames, showFrameDetails);
+                    peopleDir, savePersonCandidates, maxPersonReferences, addPersonRequest, sampleEverySeconds,
+                    personRecognition, faceRecognitionPython, faceRecognitionScript, faceRecognitionTolerance,
+                    randomSamples, randomSeed, keepFrames, showFrameDetails);
         }
     }
 
@@ -1360,13 +1448,80 @@ public class DescribeVideo {
         }
     }
 
+    private static PersonRecognitionPlan preparePersonRecognition(Options options, KnownPeople knownPeople, Path workDir, RunTimer timer)
+            throws IOException, InterruptedException {
+        if (knownPeople.isEmpty() || options.personRecognition().equals("off")) {
+            return PersonRecognitionPlan.disabled();
+        }
+        if (options.personRecognition().equals("ollama")) {
+            return PersonRecognitionPlan.ollama(knownPeople);
+        }
+
+        long startedAt = System.nanoTime();
+        try {
+            timer.log("Starting local face recognition helper...");
+            FaceRecognitionServer faceRecognizer = FaceRecognitionServer.start(options, knownPeople, workDir);
+            timer.log("Local face recognition ready in "
+                    + formatDuration(Duration.ofNanos(System.nanoTime() - startedAt))
+                    + "; encoded " + faceRecognizer.referenceFaceCount() + " reference face(s).");
+            return PersonRecognitionPlan.face(faceRecognizer);
+        } catch (IOException e) {
+            if (options.personRecognition().equals("face")) {
+                throw e;
+            }
+            timer.log("Local face recognition unavailable (" + truncate(e.getMessage(), 300)
+                    + "); falling back to Ollama known-person comparison.");
+            return PersonRecognitionPlan.ollama(knownPeople);
+        }
+    }
+
+    record FaceRecognitionResult(List<String> names, int faceCount) {
+        static FaceRecognitionResult empty() {
+            return new FaceRecognitionResult(List.of(), 0);
+        }
+
+        boolean hasMatches() {
+            return !names.isEmpty();
+        }
+
+        String namesText() {
+            return String.join(", ", names);
+        }
+    }
+
+    record PersonRecognitionPlan(KnownPeople ollamaKnownPeople, FaceRecognitionServer faceRecognizer, String description)
+            implements AutoCloseable {
+        static PersonRecognitionPlan disabled() {
+            return new PersonRecognitionPlan(KnownPeople.empty(), null, "disabled");
+        }
+
+        static PersonRecognitionPlan ollama(KnownPeople knownPeople) {
+            return new PersonRecognitionPlan(knownPeople, null, "Ollama comparison sheet; slower but no extra setup");
+        }
+
+        static PersonRecognitionPlan face(FaceRecognitionServer faceRecognizer) {
+            return new PersonRecognitionPlan(KnownPeople.empty(), faceRecognizer, "local face recognition; faster and avoids Ollama reference sheets");
+        }
+
+        @Override
+        public void close() throws IOException {
+            if (faceRecognizer != null) {
+                faceRecognizer.close();
+            }
+        }
+    }
+
     record KnownPersonReference(String name, Path imagePath) {
     }
 
     record KnownPeople(List<KnownPersonReference> references) {
+        static KnownPeople empty() {
+            return new KnownPeople(List.of());
+        }
+
         static KnownPeople load(Path peopleDir, int maxReferences) throws IOException {
             if (maxReferences == 0 || !Files.isDirectory(peopleDir)) {
-                return new KnownPeople(List.of());
+                return empty();
             }
 
             List<KnownPersonReference> references = new ArrayList<>();
@@ -1441,6 +1596,162 @@ public class DescribeVideo {
         private static String stripSampleNumber(String filename) {
             String withoutFrameLocation = KNOWN_PERSON_FRAME_SUFFIX.matcher(filename).replaceFirst("");
             return withoutFrameLocation.replaceFirst("[_-]\\d+$", "").strip();
+        }
+    }
+
+    static final class FaceRecognitionServer implements AutoCloseable {
+        private final Process process;
+        private final BufferedReader reader;
+        private final BufferedWriter writer;
+        private final int referenceFaceCount;
+
+        private FaceRecognitionServer(Process process, BufferedReader reader, BufferedWriter writer, int referenceFaceCount) {
+            this.process = process;
+            this.reader = reader;
+            this.writer = writer;
+            this.referenceFaceCount = referenceFaceCount;
+        }
+
+        static FaceRecognitionServer start(Options options, KnownPeople knownPeople, Path workDir) throws IOException {
+            if (!Files.isRegularFile(options.faceRecognitionScript())) {
+                throw new IOException("face recognition helper script not found: " + options.faceRecognitionScript());
+            }
+
+            Path referencesFile = writeFaceRecognitionReferences(workDir, knownPeople.references());
+            ProcessBuilder processBuilder = new ProcessBuilder(
+                    options.faceRecognitionPython(),
+                    options.faceRecognitionScript().toString(),
+                    "--server",
+                    "--references", referencesFile.toString(),
+                    "--tolerance", Double.toString(options.faceRecognitionTolerance())
+            );
+            processBuilder.redirectErrorStream(true);
+            Process process = processBuilder.start();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+            BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
+
+            ReadyLine ready;
+            try {
+                String readyLine = reader.readLine();
+                if (readyLine == null) {
+                    throw new IOException("local face recognition helper exited before it became ready");
+                }
+                ready = parseReadyLine(readyLine);
+                if (ready.referenceFaceCount() == 0) {
+                    throw new IOException("local face recognition found no usable faces in the known-person reference pictures");
+                }
+            } catch (IOException e) {
+                process.destroyForcibly();
+                reader.close();
+                writer.close();
+                throw e;
+            }
+            return new FaceRecognitionServer(process, reader, writer, ready.referenceFaceCount());
+        }
+
+        int referenceFaceCount() {
+            return referenceFaceCount;
+        }
+
+        FaceRecognitionResult recognize(Path framePath) throws IOException {
+            writer.write(framePath.toAbsolutePath().toString());
+            writer.newLine();
+            writer.flush();
+
+            String line = reader.readLine();
+            if (line == null) {
+                throw new IOException("local face recognition helper stopped unexpectedly");
+            }
+            return parseMatchLine(line);
+        }
+
+        @Override
+        public void close() throws IOException {
+            if (!process.isAlive()) {
+                return;
+            }
+
+            try {
+                writer.write("__QUIT__");
+                writer.newLine();
+                writer.flush();
+            } catch (IOException ignored) {
+                // The process may already be exiting; destroy below if needed.
+            }
+            try {
+                if (!process.waitFor(2, TimeUnit.SECONDS)) {
+                    process.destroy();
+                    if (!process.waitFor(2, TimeUnit.SECONDS)) {
+                        process.destroyForcibly();
+                    }
+                }
+            } catch (InterruptedException e) {
+                process.destroyForcibly();
+                Thread.currentThread().interrupt();
+            } finally {
+                reader.close();
+                writer.close();
+            }
+        }
+
+        private static Path writeFaceRecognitionReferences(Path workDir, List<KnownPersonReference> references) throws IOException {
+            Path referencesFile = workDir.resolve("face-recognition-references.tsv");
+            try (BufferedWriter referenceWriter = Files.newBufferedWriter(referencesFile, StandardCharsets.UTF_8)) {
+                for (KnownPersonReference reference : references) {
+                    referenceWriter.write(sanitizeProtocolField(reference.name()));
+                    referenceWriter.write('\t');
+                    referenceWriter.write(reference.imagePath().toAbsolutePath().toString());
+                    referenceWriter.newLine();
+                }
+            }
+            return referencesFile;
+        }
+
+        private static ReadyLine parseReadyLine(String line) throws IOException {
+            String[] parts = line.split("\t", -1);
+            if (parts.length < 2 || !parts[0].equals("READY")) {
+                if (line.startsWith("ERROR\t")) {
+                    throw new IOException("local face recognition setup failed: " + line.substring("ERROR\t".length()));
+                }
+                throw new IOException("unexpected local face recognition startup output: " + truncate(line, 300));
+            }
+            try {
+                return new ReadyLine(Integer.parseInt(parts[1]));
+            } catch (NumberFormatException e) {
+                throw new IOException("unexpected local face recognition reference count: " + truncate(line, 300));
+            }
+        }
+
+        static FaceRecognitionResult parseMatchLine(String line) throws IOException {
+            String[] parts = line.split("\t", -1);
+            if (parts.length < 2 || !parts[0].equals("MATCH")) {
+                if (line.startsWith("ERROR\t")) {
+                    throw new IOException("local face recognition failed: " + line.substring("ERROR\t".length()));
+                }
+                throw new IOException("unexpected local face recognition output: " + truncate(line, 300));
+            }
+            int faceCount;
+            try {
+                faceCount = Integer.parseInt(parts[1]);
+            } catch (NumberFormatException e) {
+                throw new IOException("unexpected local face recognition face count: " + truncate(line, 300));
+            }
+
+            List<String> names = new ArrayList<>();
+            for (int i = 2; i < parts.length; i++) {
+                String name = parts[i].strip();
+                if (!name.isBlank() && !names.contains(name)) {
+                    names.add(name);
+                }
+            }
+            return new FaceRecognitionResult(List.copyOf(names), faceCount);
+        }
+
+        private static String sanitizeProtocolField(String value) {
+            return value.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').strip();
+        }
+
+        private record ReadyLine(int referenceFaceCount) {
         }
     }
 
@@ -1624,7 +1935,7 @@ public class DescribeVideo {
             }
         }
 
-        String describeFrame(Path framePath, double seconds, KnownPeople knownPeople) throws IOException, InterruptedException {
+        String describeFrame(Path framePath, double seconds, KnownPeople knownPeople, FaceRecognitionResult faceRecognition) throws IOException, InterruptedException {
             List<String> images = new ArrayList<>();
 
             String knownPeopleInstructions = "";
@@ -1647,13 +1958,23 @@ public class DescribeVideo {
                 images.add(Base64.getEncoder().encodeToString(Files.readAllBytes(framePath)));
             }
 
+            String faceRecognitionInstructions = "";
+            if (faceRecognition != null && faceRecognition.hasMatches()) {
+                faceRecognitionInstructions = """
+
+                        Local face recognition matched visible face(s) in this frame to: %s.
+                        Use these name(s) for matching visible people when it fits the image. Do not invent names
+                        for other visible people.
+                        """.formatted(faceRecognition.namesText());
+            }
+
             String prompt = """
                     You are analyzing one sampled frame from a video at %s.
                     %s Include visible people and likely age group,
                     visible activities, place or scene, notable objects, animals, vehicles, text, mood, and concise tags.
                     Do not mention categories that are absent, unclear, or not visible. Do not invent details.
-                    Keep it under 90 words.%s
-                    """.formatted(formatTimestamp(seconds), frameScope, knownPeopleInstructions);
+                    Keep it under 90 words.%s%s
+                    """.formatted(formatTimestamp(seconds), frameScope, knownPeopleInstructions, faceRecognitionInstructions);
             return generate(prompt, images).strip();
         }
 

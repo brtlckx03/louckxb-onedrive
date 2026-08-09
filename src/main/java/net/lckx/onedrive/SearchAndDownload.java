@@ -11,12 +11,17 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
 import java.util.regex.Pattern;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 /**
  * Browses a specific folder in a OneDrive account using the Microsoft Graph API.
@@ -35,7 +40,7 @@ public class SearchAndDownload {
     private static final Path DOWNLOAD_BASE = Path.of(System.getProperty("user.home"), "Downloads", "OneDrive");
 
     void main() throws Exception {
-        var client = HttpClient.newHttpClient();
+        var client = trustAllHttpClient();
         var scanner = new Scanner(System.in);
 
         // Step 1: Authenticate (try cached token first, fall back to device code flow)
@@ -152,15 +157,11 @@ public class SearchAndDownload {
             url = GRAPH_BASE + "/me/drive/root:/" + encodedPath + ":/children";
         }
 
-        String response = get(client, url, accessToken);
-
-        if (response.contains("\"error\"")) {
+        List<String> items = fetchAllItems(client, url, accessToken);
+        if (items == null) {
             System.out.println("❌ Folder not found: \"" + path + "\"");
-            System.out.println("   " + jsonString(response, "message"));
             return null;
         }
-
-        List<String> items = jsonArray(response, "value");
         List<String[]> allItems = new ArrayList<>();
 
         List<String[]> folders = new ArrayList<>();
@@ -214,10 +215,10 @@ public class SearchAndDownload {
                 ? GRAPH_BASE + "/me/drive/root/children"
                 : GRAPH_BASE + "/me/drive/root:/" + encodePath(remotePath) + ":/children";
 
-        String response = get(client, url, accessToken);
-        if (response.contains("\"error\"")) return;
+        List<String> items = fetchAllItems(client, url, accessToken);
+        if (items == null) return;
 
-        for (String item : jsonArray(response, "value")) {
+        for (String item : items) {
             if (item.contains("\"folder\"")) {
                 counters[1]++; // total folders
                 String name = jsonString(item, "name");
@@ -241,10 +242,10 @@ public class SearchAndDownload {
                 ? GRAPH_BASE + "/me/drive/root/children"
                 : GRAPH_BASE + "/me/drive/root:/" + encodePath(remotePath) + ":/children";
 
-        String response = get(client, url, accessToken);
-        if (response.contains("\"error\"")) { System.out.println("  ❌ Could not list: " + remotePath); return; }
+        List<String> items = fetchAllItems(client, url, accessToken);
+        if (items == null) { System.out.println("  ❌ Could not list: " + remotePath); return; }
 
-        for (String item : jsonArray(response, "value")) {
+        for (String item : items) {
             String name = jsonString(item, "name");
             if (item.contains("\"folder\"")) {
                 counters[0]++;
@@ -279,14 +280,11 @@ public class SearchAndDownload {
                 ? GRAPH_BASE + "/me/drive/root/children"
                 : GRAPH_BASE + "/me/drive/root:/" + encodePath(remotePath) + ":/children";
 
-        String response = get(client, url, accessToken);
-
-        if (response.contains("\"error\"")) {
+        List<String> items = fetchAllItems(client, url, accessToken);
+        if (items == null) {
             System.out.println("  ❌ Could not list: " + remotePath);
             return;
         }
-
-        List<String> items = jsonArray(response, "value");
 
         // Count files in this folder from the listing we already have — no extra API call needed
         int filesInFolder = (int) items.stream().filter(i -> !i.contains("\"folder\"")).count();
@@ -428,6 +426,32 @@ public class SearchAndDownload {
     }
 
     // --- HTTP helpers ---
+
+    /** Fetches all paginated items from a Graph API list URL. Returns null if the first response is an error. */
+    List<String> fetchAllItems(HttpClient client, String firstUrl, String accessToken) throws Exception {
+        List<String> all = new ArrayList<>();
+        String nextUrl = firstUrl;
+        while (nextUrl != null && !nextUrl.isEmpty()) {
+            String response = get(client, nextUrl, accessToken);
+            if (response.contains("\"error\"")) return null;
+            all.addAll(jsonArray(response, "value"));
+            nextUrl = jsonString(response, "@odata.nextLink");
+        }
+        return all;
+    }
+
+    /** Returns an HttpClient that trusts all certificates (needed for Microsoft CDN download URLs). */
+    HttpClient trustAllHttpClient() throws Exception {
+        var trustAll = new X509TrustManager() {
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+            public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+        };
+        var sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, new TrustManager[]{trustAll}, new SecureRandom());
+        return HttpClient.newBuilder().sslContext(sslContext).build();
+    }
+
 
     String post(HttpClient client, String url, Map<String, String> formParams) throws Exception {
         // Use LinkedHashMap to guarantee iteration order for predictable encoding

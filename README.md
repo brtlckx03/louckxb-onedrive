@@ -43,7 +43,7 @@ The apps request **read-only** access (`Files.Read` + `offline_access`).
 
 ---
 
-## net.lckx.video.DescribeVideo
+## net.lckx.describe.DescribeVideo
 
 Describes what is in a local video by sampling frames with `ffmpeg` and asking a local
 Ollama vision model what each frame contains. It can identify scenes and tags such as
@@ -61,8 +61,14 @@ transcription is local when using the documented Whisper commands.
 ```bash
 brew install ffmpeg
 brew install ollama
-ollama pull llama3.2-vision
+ollama pull qwen2.5vl:7b
 ollama serve
+```
+
+Alternatively, run the helper script from the repo root — it installs Ollama via Homebrew if missing, starts `ollama serve` in the background, and pulls the vision model:
+
+```bash
+./start-ollama.sh
 ```
 
 Speech transcription:
@@ -85,13 +91,34 @@ brew install whisper-cpp
 # Then pass --speech-model /path/to/ggml-model.bin when running
 ```
 
+Optional faster local known-person recognition:
+
+```bash
+python3 -m venv ~/.venvs/video-face-recognition
+~/.venvs/video-face-recognition/bin/pip install "setuptools<81" face_recognition
+```
+
+Then run with:
+
+```bash
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 \
+  --face-recognition-python ~/.venvs/video-face-recognition/bin/python
+```
+
+This uses the free local Python `face_recognition` package, which is built on `dlib`, to
+match faces before the frame is sent to Ollama. That avoids sending known-person reference
+image sheets to Ollama for every frame, so known-person naming is usually much faster. If
+the Python package is not installed, the default `auto` mode falls back to the slower Ollama
+comparison sheet.
+
 ### Run
 
 ```bash
-java --enable-preview src/main/java/net/lckx/video/DescribeVideo.java ~/Movies/holiday.mp4 --frames 12 --details
-java --enable-preview src/main/java/net/lckx/video/DescribeVideo.java ~/Movies/holiday.mp4 --speech-language nl
-java --enable-preview src/main/java/net/lckx/video/DescribeVideo.java ~/Movies/holiday.mp4 --no-transcribe
-java --enable-preview src/main/java/net/lckx/video/DescribeVideo.java ~/Movies/holiday.mp4 --random-samples
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 --frames 12 --details
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 --speech-language nl
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 --no-transcribe
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 --random-samples
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 --no-known-people
 ```
 
 ### Known people workflow
@@ -115,16 +142,32 @@ Frame-location samples such as `Mila-01-01m26s.jpg` and `Mila-02-02m53s.jpg` are
 treated as the same person, `Mila`. If the model is not confident, it should keep using
 a generic description.
 
+Known-person comparison can be slow because each sampled frame is sent to Ollama together
+with reference images. To skip known-person matching for a faster run while still saving
+new candidate pictures, use:
+
+```bash
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 --no-known-people
+```
+
+To use the local face recognizer explicitly:
+
+```bash
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 \
+  --person-recognition face \
+  --face-recognition-python ~/.venvs/video-face-recognition/bin/python
+```
+
 You can also add a reference image directly:
 
 ```bash
-java --enable-preview src/main/java/net/lckx/video/DescribeVideo.java --add-person "Mila" ~/Pictures/mila.jpg
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java --add-person "Mila" ~/Pictures/mila.jpg
 ```
 
 To review remaining generated candidate pictures interactively:
 
 ```bash
-java --enable-preview src/main/java/net/lckx/video/ReviewPersonCandidates.java
+java --enable-preview src/main/java/net/lckx/describe/ReviewPersonCandidates.java
 ```
 
 This scans `video-people/` for image filenames that still contain `frame`, opens each image
@@ -138,7 +181,7 @@ the terminal preview and open the real image.
 
 | Option | Action |
 |--------|--------|
-| `--model <name>` | Ollama vision model to use. Default: `llama3.2-vision` |
+| `--model <name>` | Ollama vision model to use. Default: `qwen2.5vl:7b` |
 | `--host <url>` | Ollama host. Default: `http://localhost:11434` |
 | `--frames <number>` | Number of frames to sample. Auto-tuned by duration unless provided. Max: `50` |
 | `--sample-every-seconds <n>` | Sample one frame every `n` seconds instead of using `--frames`; for example `5` seconds gives about `86` frames for a 07:12 video |
@@ -156,6 +199,10 @@ the terminal preview and open the real image.
 | `--people-dir <path>` | Known people library. Default: `./video-people` |
 | `--add-person <name> <image>` | Add a reference picture for a known person, then exit |
 | `--max-person-refs <n>` | Max known-person reference pictures sent to Ollama. Default: `8` |
+| `--no-known-people` | Skip known-person comparison for speed; candidate pictures are still saved unless `--no-save-person-candidates` is also used |
+| `--person-recognition <mode>` | Known-person method: `auto`, `face`, `ollama`, or `off`. Default: `auto` |
+| `--face-recognition-python <path>` | Python executable for local `face_recognition`. Default: `python3` |
+| `--face-recognition-tolerance <n>` | Local face match threshold. Default: `0.6`; lower is stricter |
 | `--save-person-candidates` | Save sampled frames that appear to contain people. Enabled by default |
 | `--no-save-person-candidates` | Do not save candidate person pictures |
 | `--details` | Print every sampled-frame observation after the final summary |
@@ -176,11 +223,41 @@ instead of aborting the whole run.
 For deeper coverage you can explicitly sample more densely:
 
 ```bash
-java --enable-preview src/main/java/net/lckx/video/DescribeVideo.java ~/Movies/holiday.mp4 --sample-every-seconds 5
+java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 --sample-every-seconds 5
 ```
 
 This is easy for `ffmpeg`, but it can be slow for Ollama because every sampled frame is a
 separate vision request.
+
+---
+
+## net.lckx.describe.DescribeImage
+
+Describes what is visible in one local image with the same local Ollama vision model and
+known-people library used by `DescribeVideo`. It can name people when they match references
+under `video-people/`, and it can use the optional local `face_recognition` setup for faster
+matching.
+
+Run:
+
+```bash
+java --enable-preview src/main/java/net/lckx/describe/DescribeImage.java ~/Pictures/photo.jpg
+java --enable-preview src/main/java/net/lckx/describe/DescribeImage.java ~/Pictures/photo.jpg --details
+java --enable-preview src/main/java/net/lckx/describe/DescribeImage.java ~/Pictures/photo.jpg --no-known-people
+```
+
+Add a known-person reference directly from an image:
+
+```bash
+java --enable-preview src/main/java/net/lckx/describe/DescribeImage.java --add-person "Mila" ~/Pictures/mila.jpg
+```
+
+Useful options are shared with the video tool: `--model`, `--host`, `--timeout-minutes`,
+`--people-dir`, `--max-person-refs`, `--person-recognition`, `--face-recognition-python`,
+`--face-recognition-tolerance`, and `--no-known-people`. If
+`~/.venvs/video-face-recognition/bin/python` exists, `DescribeImage` uses it by default for
+local face recognition; otherwise it uses `python3` and can fall back to Ollama comparison
+sheets in `auto` mode.
 
 ---
 
@@ -191,7 +268,7 @@ Interactive folder browser with download capability.
 ### Run
 
 ```bash
-java --enable-preview src/net.lckx.onedrive.SearchAndDownload.java
+java --enable-preview src/main/java/net/lckx/onedrive/SearchAndDownload.java
 ```
 
 ### Features
@@ -252,7 +329,7 @@ Scans your entire OneDrive and ranks folders by total size.
 ### Run
 
 ```bash
-java --enable-preview src/net.lckx.onedrive.FindBiggestFolders.java
+java --enable-preview src/main/java/net/lckx/onedrive/FindBiggestFolders.java
 ```
 
 ### How it works
@@ -287,23 +364,27 @@ Total OneDrive usage: 42.3 GB
 ```
 louckxb-onedrive/
 ├── pom.xml                                          # Maven configuration
+├── start-ollama.sh                                  # Helper: install/start Ollama and pull the vision model
+├── docs/
+│   └── ADB_SETUP.md                                 # ADB-based phone access setup guide
 ├── src/
 │   ├── main/java/net/lckx/
 │   │   ├── onedrive/
-│   │   │   ├── SearchAndDownload.java              # Interactive browser & downloader
+│   │   │   ├── SearchAndDownload.java              # Interactive OneDrive browser & downloader
 │   │   │   ├── FindBiggestFolders.java             # Folder size analyzer
 │   │   │   └── Upload.java                         # Upload files to OneDrive
-│   │   ├── video/
-│   │   │   └── DescribeVideo.java                  # Local video description tool
-│   │   └── phone/
-│   │       ├── AndroidPhone.java                   # Phone model
-│   │       └── ReadFilesOnPhoneADB.java            # ADB integration
-│   ├── cli-tests/                                   # Standalone CLI tests
-│   │   ├── OneDriveHelpersTest.java                # Tests for shared helper methods
-│   │   ├── UploadPathTransformTest.java            # Tests for path transformation
-│   │   └── AndroidPhoneTest.java                   # Tests for phone integration
-│   └── main/resources/                              # Resource files (if needed)
-└── target/                                          # Build output (created by Maven)
+│   │   ├── describe/
+│   │   │   ├── DescribeVideo.java                  # Local video description tool
+│   │   │   ├── DescribeImage.java                  # Local image description tool
+│   │   │   └── ReviewPersonCandidates.java         # Rename/delete candidate person pictures
+│   │   ├── phone/
+│   │   │   ├── AndroidPhone.java                   # ADB-based phone model
+│   │   │   └── ReadFilesOnPhoneADB.java            # ADB integration (current)
+│   │   ├── Phone.java                              # Legacy mounted-volume phone model
+│   │   └── ReadFilesOnPhone.java                   # Legacy mounted-volume browser
+│   └── main/python/net/lckx/video/
+│       └── face_recognize.py                       # Optional local face-recognition helper
+└── src/test/java/net/lckx/                          # JUnit tests (run with `mvn test`)
 ```
 
 ## Shared internals
@@ -327,19 +408,18 @@ Both applications include the same set of helper methods (no external dependenci
 
 ## Testing
 
-### CLI Tests
-
-Standalone test files in `src/cli-tests/` can be run directly with Java:
+Tests live under `src/test/java/` as JUnit 5 tests and run through Maven:
 
 ```bash
-# OneDrive helpers test
-java --enable-preview --source 25 src/cli-tests/OneDriveHelpersTest.java
+# Run everything
+mvn test
 
-# Upload path transformation test
-java --enable-preview --source 25 src/cli-tests/UploadPathTransformTest.java
-
-# Android phone test
-java --enable-preview --source 25 src/cli-tests/AndroidPhoneTest.java
+# Run a single test class
+mvn test -Dtest=OneDriveHelpersTest
+mvn test -Dtest=UploadPathTransformTest
+mvn test -Dtest=AndroidPhoneTest
+mvn test -Dtest=DescribeImageTest
+mvn test -Dtest=DescribeVideoTest
 ```
 
-These tests use Java 25 preview features for streamlined test code without external test frameworks.
+`AndroidPhoneTest` skips its integration checks when no ADB device is connected.
