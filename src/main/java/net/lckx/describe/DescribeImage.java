@@ -35,6 +35,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import javax.imageio.ImageIO;
 
+import net.lckx.util.JsonHelpers;
+
 /**
  * Describes visible content in one image with a local Ollama vision model.
  *

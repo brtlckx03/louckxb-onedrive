@@ -28,6 +28,8 @@ import java.util.Scanner;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import net.lckx.util.JsonHelpers;
+
 /**
  * Prints where a photo or video was taken.
  *
@@ -106,10 +108,15 @@ public class PrintMediaLocation {
             }
 
             if (options.reverseGeocode()) {
-                Optional<String> location = reverseGeocode(fix, options.userAgent(), options.timeout(), options.acceptLanguage());
-                location.ifPresentOrElse(
-                        loc -> System.out.println("Location: " + loc),
-                        () -> System.out.println("Location: (no address returned by Nominatim)"));
+                Optional<List<String>> parts = reverseGeocodeParts(fix, options.userAgent(), options.timeout(), options.acceptLanguage());
+                if (parts.isPresent() && !parts.get().isEmpty()) {
+                    System.out.println("Location: " + String.join(", ", parts.get()));
+                    if (options.suggestFilename()) {
+                        System.out.println("Suggested filename: " + suggestFilename(options.file(), parts.get()));
+                    }
+                } else {
+                    System.out.println("Location: (no address returned by Nominatim)");
+                }
             }
             return 0;
         } catch (HelpException e) {
@@ -512,7 +519,7 @@ public class PrintMediaLocation {
     }
 
     private static final Pattern ISO_6709_PATTERN = Pattern.compile(
-            "([+-]\\d{1,3}(?:\\.\\d+)?)([+-]\\d{1,3}(?:\\.\\d+)?)");
+            "([+-]\\d{1,3}(?:\\.\\d+)?)([+-]\\d{1,3}(?:\\.\\d+)?)(?:[+-]\\d+(?:\\.\\d+)?)?/");
 
     static Optional<GpsFix> parseIso6709(String text) {
         if (text == null || text.isEmpty()) return Optional.empty();
@@ -890,7 +897,39 @@ public class PrintMediaLocation {
         }
     }
 
+    Optional<List<String>> reverseGeocodeParts(GpsFix fix, String userAgent, Duration timeout, String acceptLanguage) throws IOException, InterruptedException {
+        String body = fetchNominatimBody(fix, userAgent, timeout, acceptLanguage);
+        List<String> parts = locationParts(body);
+        if (!parts.isEmpty()) return Optional.of(parts);
+        List<String> fallback = fallbackParts(body);
+        return fallback.isEmpty() ? Optional.empty() : Optional.of(fallback);
+    }
+
+    static List<String> fallbackParts(String body) {
+        String name = JsonHelpers.jsonString(body, "name");
+        String displayName = JsonHelpers.jsonString(body, "display_name");
+        List<String> parts = new ArrayList<>();
+        if (!name.isBlank()) parts.add(name.trim());
+        for (String segment : displayName.split(",")) {
+            String trimmed = segment.trim();
+            if (trimmed.isEmpty()) continue;
+            if (trimmed.matches("\\d{4,}[A-Za-z]?")) continue;
+            if (parts.stream().anyMatch(existing -> existing.equalsIgnoreCase(trimmed))) continue;
+            parts.add(trimmed);
+            if (parts.size() >= 3) break;
+        }
+        if (parts.stream().anyMatch(PrintMediaLocation::hasLatinLetter)) {
+            parts.removeIf(part -> !hasLatinLetter(part));
+        }
+        return parts;
+    }
+
     Optional<String> reverseGeocode(GpsFix fix, String userAgent, Duration timeout, String acceptLanguage) throws IOException, InterruptedException {
+        return composeLocation(fetchNominatimBody(fix, userAgent, timeout, acceptLanguage));
+    }
+
+    private String fetchNominatimBody(GpsFix fix, String userAgent, Duration timeout, String acceptLanguage)
+            throws IOException, InterruptedException {
         String url = NOMINATIM_HOST + "/reverse"
                 + "?format=jsonv2"
                 + "&lat=" + URLEncoder.encode(String.format(Locale.ROOT, "%.6f", fix.latitude()), StandardCharsets.UTF_8)
@@ -921,7 +960,7 @@ public class PrintMediaLocation {
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             throw new IOException("Nominatim returned HTTP " + response.statusCode() + ".");
         }
-        return composeLocation(response.body());
+        return response.body();
     }
 
     static List<String> locationParts(String body) {
@@ -951,24 +990,35 @@ public class PrintMediaLocation {
 
     static Optional<String> composeLocation(String body) {
         List<String> parts = locationParts(body);
-        if (parts.isEmpty()) {
-            String displayName = JsonHelpers.jsonString(body, "display_name");
-            return displayName.isEmpty() ? Optional.empty() : Optional.of(displayName);
-        }
-        return Optional.of(String.join(", ", parts));
+        if (parts.isEmpty()) parts = fallbackParts(body);
+        return parts.isEmpty() ? Optional.empty() : Optional.of(String.join(", ", parts));
     }
+
+    private static final Pattern TIMESTAMP_PREFIX = Pattern.compile("^(\\d{8}[_-]\\d{6})(.*)$");
 
     static String suggestFilename(Path original, List<String> parts) {
         String name = original.getFileName().toString();
         int dot = name.lastIndexOf('.');
         String stem = dot > 0 ? name.substring(0, dot) : name;
         String ext = dot > 0 ? name.substring(dot) : "";
-        StringBuilder sb = new StringBuilder(stem);
+
+        String head = stem;
+        String tail = "";
+        Matcher matcher = TIMESTAMP_PREFIX.matcher(stem);
+        if (matcher.matches()) {
+            head = matcher.group(1);
+            tail = matcher.group(2).replaceFirst("^[\\s_\\-]+", "").strip();
+        }
+
+        StringBuilder sb = new StringBuilder(head);
         for (String part : parts) {
             String cleaned = toFilenamePart(part);
             if (!cleaned.isBlank()) {
                 sb.append('_').append(cleaned);
             }
+        }
+        if (!tail.isEmpty()) {
+            sb.append('_').append(tail);
         }
         return sb.append(ext).toString();
     }
@@ -984,6 +1034,8 @@ public class PrintMediaLocation {
                 .replace('<', '-')
                 .replace('>', '-')
                 .replace('|', '-')
+                .replace(',', '-')
+                .replace(';', '-')
                 .replace(' ', '-')
                 .replaceAll("-+", "-");
         while (cleaned.startsWith("-")) cleaned = cleaned.substring(1);
@@ -1065,6 +1117,8 @@ public class PrintMediaLocation {
                   --language <accept-language>    Preferred language for Nominatim place names,
                                                   e.g. "en", "nl", or "nl,en;q=0.5". Default:
                                                   system language with English fallback.
+                  --suggest-filename              Also print a filename-safe rename suggestion,
+                                                  e.g. 20250924_234911_Chiang-Mai_Khampangdin-Road.jpg
                   --help                          Show this help
 
                 Nominatim is a free OpenStreetMap-based reverse geocoder. Please respect

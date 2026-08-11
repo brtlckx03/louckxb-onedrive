@@ -113,6 +113,46 @@ class PrintMediaLocationTest {
     }
 
     @Test
+    void suggestFilename_joinsPartsAndPreservesExtension() {
+        Path original = Path.of("/Users/x/photos/20250924_234911.jpg");
+        java.util.List<String> parts = java.util.List.of("Chiang Mai City Municipality", "Khampangdin Road");
+
+        String suggested = PrintMediaLocation.suggestFilename(original, parts);
+
+        assertEquals("20250924_234911_Chiang-Mai-City-Municipality_Khampangdin-Road.jpg", suggested);
+    }
+
+    @Test
+    void suggestFilename_movesExistingTailAfterLocation() {
+        Path original = Path.of("20250824_185305 ik hou van u.mp4");
+        java.util.List<String> parts = java.util.List.of("Nieuwpoort", "Nieuwpoort-Bad", "Albert I-laan");
+
+        String suggested = PrintMediaLocation.suggestFilename(original, parts);
+
+        assertEquals("20250824_185305_Nieuwpoort_Nieuwpoort-Bad_Albert-I-laan_ik hou van u.mp4", suggested);
+    }
+
+    @Test
+    void suggestFilename_leavesNonTimestampStemsUntouchedAtFront() {
+        Path original = Path.of("DSC00676.JPG");
+        java.util.List<String> parts = java.util.List.of("Sint-Pieters-Leeuw", "Jan Vanderstraetenstraat");
+
+        String suggested = PrintMediaLocation.suggestFilename(original, parts);
+
+        assertEquals("DSC00676_Sint-Pieters-Leeuw_Jan-Vanderstraetenstraat.JPG", suggested);
+    }
+
+    @Test
+    void suggestFilename_stripsUnsafeCharacters() {
+        Path original = Path.of("clip.mp4");
+        java.util.List<String> parts = java.util.List.of("Foo/Bar", "hello:world", "spaces   between");
+
+        String suggested = PrintMediaLocation.suggestFilename(original, parts);
+
+        assertEquals("clip_Foo-Bar_hello-world_spaces-between.mp4", suggested);
+    }
+
+    @Test
     void jpegTimestamp_appliesOffsetWhenPresent() {
         java.time.LocalDateTime local = java.time.LocalDateTime.of(2025, 9, 27, 7, 51, 31);
         java.time.ZoneOffset thailand = java.time.ZoneOffset.of("+07:00");
@@ -179,7 +219,7 @@ class PrintMediaLocationTest {
         Optional<String> location = PrintMediaLocation.composeLocation(body);
 
         assertTrue(location.isPresent());
-        assertEquals("Sint-Pieters-Leeuw Mekingen Pijnbroekstraat", location.get());
+        assertEquals("Sint-Pieters-Leeuw, Mekingen, Pijnbroekstraat", location.get());
     }
 
     @Test
@@ -195,7 +235,7 @@ class PrintMediaLocationTest {
         Optional<String> location = PrintMediaLocation.composeLocation(body);
 
         assertTrue(location.isPresent());
-        assertEquals("Chiang Mai City Municipality Khampangdin Road", location.get());
+        assertEquals("Chiang Mai City Municipality, Khampangdin Road", location.get());
     }
 
     @Test
@@ -221,6 +261,33 @@ class PrintMediaLocationTest {
 
         assertTrue(location.isPresent());
         assertEquals("Somewhere over the rainbow", location.get());
+    }
+
+    @Test
+    void composeLocation_splitsDisplayNameOnCommas() {
+        String body = """
+                {"name":"Tam Lod Thalu Mountain Kayaking",
+                 "display_name":"Tam Lod Thalu Mountain Kayaking, Phang-nga Province, 82170, Thailand"}
+                """;
+
+        Optional<String> location = PrintMediaLocation.composeLocation(body);
+
+        assertTrue(location.isPresent());
+        assertEquals("Tam Lod Thalu Mountain Kayaking, Phang-nga Province, Thailand", location.get());
+    }
+
+    @Test
+    void suggestFilename_stripsCommasFromParts() {
+        Path original = Path.of("20251005_132417.jpg");
+        java.util.List<String> parts = java.util.List.of(
+                "Tam Lod Thalu Mountain Kayaking",
+                "Phang-nga Province",
+                "Thailand");
+
+        String suggested = PrintMediaLocation.suggestFilename(original, parts);
+
+        assertFalse(suggested.contains(","));
+        assertEquals("20251005_132417_Tam-Lod-Thalu-Mountain-Kayaking_Phang-nga-Province_Thailand.jpg", suggested);
     }
 
     @Test
@@ -271,6 +338,12 @@ class PrintMediaLocationTest {
         assertTrue(PrintMediaLocation.parseIso6709("").isEmpty());
         assertTrue(PrintMediaLocation.parseIso6709("hello world").isEmpty());
         assertTrue(PrintMediaLocation.parseIso6709("+95.0+200.0/").isEmpty());
+    }
+
+    @Test
+    void parseIso6709_doesNotMatchDatesInsideStrings() {
+        assertTrue(PrintMediaLocation.parseIso6709("creation_time=2025-01-11T20:36:07.000000Z").isEmpty());
+        assertTrue(PrintMediaLocation.parseIso6709("date -01-11 in the middle of text").isEmpty());
     }
 
     @Test

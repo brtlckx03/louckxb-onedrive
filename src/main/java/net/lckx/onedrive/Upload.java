@@ -59,10 +59,10 @@ public class Upload {
             if (accessToken == null) return;
 
             System.out.printf("Local folder to upload [%s]: ", DEFAULT_CAMERA);
-            String localInput = scanner.nextLine().trim();
+            String localInput = unquote(scanner.nextLine().trim());
             if (localInput.equalsIgnoreCase("q") || localInput.equalsIgnoreCase("quit")) break;
             Path localFolder = localInput.isEmpty() ? DEFAULT_CAMERA :
-                    Path.of(localInput.contains("/") ? localInput : DEFAULT_CAMERA + "/" + localInput);
+                    Path.of(localInput.contains("/") ? expandHome(localInput) : DEFAULT_CAMERA + "/" + localInput);
             if (!Files.isDirectory(localFolder)) {
                 System.out.println("❌ Not a valid local folder: " + localFolder);
                 continue;
@@ -73,7 +73,7 @@ public class Upload {
             String prefix = folderName.length() >= 4 ? folderName.substring(0, 4) : "";
             String suggestedRemote = prefix.matches("\\d{4}") ? prefix + "/" + folderName : folderName;
             System.out.printf("OneDrive destination [%s]: ", suggestedRemote);
-            String remoteInput = scanner.nextLine().trim();
+            String remoteInput = unquote(scanner.nextLine().trim());
             String remotePath = remoteInput.isEmpty() ? suggestedRemote : remoteInput;
 
             // Count files to upload
@@ -444,5 +444,18 @@ public class Upload {
         return items;
     }
 
+    private static String unquote(String input) {
+        if (input.length() >= 2
+                && ((input.startsWith("\"") && input.endsWith("\""))
+                    || (input.startsWith("'") && input.endsWith("'")))) {
+            return input.substring(1, input.length() - 1).trim();
+        }
+        return input;
+    }
 
+    private static String expandHome(String value) {
+        if (value.equals("~")) return System.getProperty("user.home");
+        if (value.startsWith("~/")) return System.getProperty("user.home") + value.substring(1);
+        return value;
+    }
 }
