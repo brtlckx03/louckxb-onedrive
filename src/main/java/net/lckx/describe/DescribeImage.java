@@ -39,7 +39,7 @@ import net.lckx.util.JsonHelpers;
 
 /**
  * Describes visible content in one image with a local Ollama vision model.
- *
+ * <p>
  * Known-person references are read from the same ./video-people library used by DescribeVideo.
  */
 public class DescribeImage {

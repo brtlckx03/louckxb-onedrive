@@ -1,11 +1,15 @@
 package net.lckx.phone;
 
 import java.io.IOException;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.TemporalAdjusters;
 import java.util.List;
 import java.util.Scanner;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Main entry point for reading and filtering files from Samsung phone via ADB.
@@ -47,9 +51,9 @@ public class ReadFilesOnPhoneADB {
 
                 if (selectedPhotos != null && !selectedPhotos.isEmpty()) {
                     displayResults(selectedPhotos, phone);
-                    System.out.print("\nDownload these photos from phone? (yes/no): ");
+                    System.out.print("\nDownload these photos from phone? (Yes/no): ");
                     String downloadChoice = scanner.nextLine().trim().toLowerCase();
-                    if (downloadChoice.equals("yes") || downloadChoice.equals("y")) {
+                    if (downloadChoice.isEmpty() || downloadChoice.equals("yes") || downloadChoice.equals("y")) {
                         promptAndDownloadPhotos(scanner, selectedPhotos);
                     }
                 } else {
@@ -57,12 +61,12 @@ public class ReadFilesOnPhoneADB {
                 }
 
                 System.out.println("\n╔════════════════════════════════════════════╗");
-                System.out.print("Search more photos? (yes/no/exit): ");
+                System.out.print("Search more photos? (Yes/no/exit): ");
                 String continueChoice = scanner.nextLine().trim().toLowerCase();
 
                 if (continueChoice.equals("exit") || continueChoice.equals("quit") || continueChoice.equals("q")) {
                     continueSearching = false;
-                } else if (!continueChoice.equals("yes") && !continueChoice.equals("y")) {
+                } else if (!continueChoice.isEmpty() && !continueChoice.equals("yes") && !continueChoice.equals("y")) {
                     continueSearching = false;
                 }
             }
@@ -241,9 +245,9 @@ public class ReadFilesOnPhoneADB {
         long totalSize = photos.stream().mapToLong(AndroidPhone.PhotoFile::size).sum();
         System.out.println("💾 Total size: " + formatFileSize(totalSize));
 
-        System.out.print("\nProceed with download? (yes/no): ");
+        System.out.print("\nProceed with download? (Yes/no): ");
         String confirm = scanner.nextLine().trim().toLowerCase();
-        if (!confirm.equals("yes") && !confirm.equals("y")) {
+        if (!confirm.isEmpty() && !confirm.equals("yes") && !confirm.equals("y")) {
             System.out.println("❌ Download cancelled.");
             return;
         }
@@ -256,28 +260,35 @@ public class ReadFilesOnPhoneADB {
         System.out.println("║        Downloading Photos...               ║");
         System.out.println("╚════════════════════════════════════════════╝\n");
 
+        java.nio.file.Path baseFolder = java.nio.file.Paths.get(localFolder);
+
         try {
-            // Create local folder
-            java.nio.file.Files.createDirectories(java.nio.file.Paths.get(localFolder));
+            java.nio.file.Files.createDirectories(baseFolder);
 
             int successCount = 0;
             for (int i = 0; i < photos.size(); i++) {
                 AndroidPhone.PhotoFile photo = photos.get(i);
-                String localPath = localFolder + photo.filename();
+                String weekFolder = weekFolderName(photo.modifiedDateTime().toLocalDate());
+                String targetName = datePrefixedFilename(photo.filename());
+                java.nio.file.Path weekPath = baseFolder.resolve(weekFolder);
+                String localPath;
 
                 try {
+                    java.nio.file.Files.createDirectories(weekPath);
+                    localPath = weekPath.resolve(targetName).toString();
+
                     ProcessBuilder pb = new ProcessBuilder(adbCommand, "-s", photo.device(),
                             "pull", photo.remotePath(), localPath);
                     int exitCode = pb.start().waitFor();
 
                     if (exitCode == 0) {
-                        System.out.printf("  [%d/%d] Downloaded: %s\n", i + 1, photos.size(), photo.filename());
+                        System.out.printf("  [%d/%d] Downloaded: %s/%s\n", i + 1, photos.size(), weekFolder, targetName);
                         successCount++;
                     } else {
-                        System.err.printf("  [%d/%d] Failed: %s\n", i + 1, photos.size(), photo.filename());
+                        System.err.printf("  [%d/%d] Failed: %s/%s\n", i + 1, photos.size(), weekFolder, targetName);
                     }
                 } catch (Exception e) {
-                    System.err.printf("  [%d/%d] Error: %s\n", i + 1, photos.size(), photo.filename());
+                    System.err.printf("  [%d/%d] Error: %s/%s\n", i + 1, photos.size(), weekFolder, targetName);
                 }
             }
 
@@ -290,6 +301,54 @@ public class ReadFilesOnPhoneADB {
         } catch (IOException e) {
             System.err.println("\n❌ Download error: " + e.getMessage());
         }
+    }
+
+    private static final DateTimeFormatter WEEK_FMT = DateTimeFormatter.ofPattern("yyyyMMdd");
+
+    /** Returns "YYYYMMDD-YYYYMMDD" for the Monday..Sunday week containing {@code date}. */
+    static String weekFolderName(LocalDate date) {
+        LocalDate monday = date.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+        LocalDate sunday = monday.plusDays(6);
+        return monday.format(WEEK_FMT) + "-" + sunday.format(WEEK_FMT);
+    }
+
+    // Matches an 8-digit date embedded in a filename, optionally followed by a 6-digit time,
+    // with '_' or '-' separators on both sides. Returns null groups when parts are absent.
+    private static final Pattern DATE_IN_NAME = Pattern.compile(
+            "^(.*?)([_-])(\\d{8})(?:([_-])(\\d{6}))?(?:([_-])(.*))?$");
+
+    /**
+     * Moves an embedded YYYYMMDD (and optional HHMMSS) to the front of the filename so files
+     * sort chronologically. Preserves original separators and extension. Returns the input
+     * unchanged if no embedded date is found or if the filename already starts with a date.
+     */
+    static String datePrefixedFilename(String filename) {
+        int dot = filename.lastIndexOf('.');
+        String base = dot >= 0 ? filename.substring(0, dot) : filename;
+        String ext = dot >= 0 ? filename.substring(dot) : "";
+
+        if (base.length() >= 8 && base.substring(0, 8).chars().allMatch(Character::isDigit)) {
+            return filename;
+        }
+
+        Matcher m = DATE_IN_NAME.matcher(base);
+        if (!m.matches()) return filename;
+
+        String prefix = m.group(1);
+        String sepBeforeDate = m.group(2);
+        String date = m.group(3);
+        String sepBeforeTime = m.group(4);
+        String time = m.group(5);
+        String sepAfterDateTime = m.group(6);
+        String rest = m.group(7);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(date);
+        if (time != null) sb.append(sepBeforeTime).append(time);
+        if (!prefix.isEmpty()) sb.append(sepBeforeDate).append(prefix);
+        if (rest != null && !rest.isEmpty()) sb.append(sepAfterDateTime).append(rest);
+        sb.append(ext);
+        return sb.toString();
     }
 
     private static void showAdbSetupGuide() {

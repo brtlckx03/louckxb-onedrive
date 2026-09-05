@@ -113,10 +113,16 @@ public class AndroidPhone {
         String[] mediaDirs = {
                 "/sdcard/DCIM/Camera",
                 "/sdcard/SdCardBackUp/DCIM/Camera",
+                // Legacy WhatsApp storage (pre-Android 11)
                 "/sdcard/WhatsApp/Media/WhatsApp Images",
                 "/sdcard/WhatsApp/Media/WhatsApp Video",
                 "/sdcard/WhatsApp/Media/WhatsApp Documents",
                 "/sdcard/WhatsApp/Media/WhatsApp Animated Gifs",
+                // Scoped-storage WhatsApp paths (Android 11+)
+                "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images",
+                "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video",
+                "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents",
+                "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Animated Gifs",
                 "/sdcard/Download",
                 "/sdcard/DCIM",
                 "/sdcard/Pictures",
@@ -140,9 +146,20 @@ public class AndroidPhone {
             throw new IOException("No media files found in any directory");
         }
 
+        dedupeByRemotePath();
         photoFiles.sort(Comparator.comparing(PhotoFile::modifiedDateTime));
 
         loadTimeMs = System.currentTimeMillis() - startTime;
+    }
+
+    /**
+     * Removes duplicate photo entries with the same remote path. Overlapping media roots
+     * (e.g. /sdcard/DCIM/Camera and /sdcard/DCIM) plus recursive listing can otherwise
+     * add the same file twice.
+     */
+    private void dedupeByRemotePath() {
+        java.util.HashSet<String> seen = new java.util.HashSet<>(photoFiles.size() * 2);
+        photoFiles.removeIf(p -> !seen.add(p.remotePath()));
     }
 
     /**
@@ -182,32 +199,41 @@ public class AndroidPhone {
     }
 
     /**
-     * Loads photos from a specific directory via ADB using ls -l for fast batch retrieval.
-     * This is the primary method - works on all Android systems.
-     * Optimized for large number of files.
+     * Loads photos from a specific directory via ADB using ls -lR for recursive batch retrieval.
+     * Works on all Android systems and descends into subdirectories (needed for WhatsApp,
+     * which nests images under Sent/, Private/, and year-month folders).
      */
     private void loadPhotosFromDirectory(String device, String dir) throws IOException {
         try {
-            // Use ls -l to get all files with metadata in one command (non-recursive)
-            // Quote directory path to handle spaces in directory names
-            ProcessBuilder pb = new ProcessBuilder(adbCommand, "-s", device, "shell", "ls -l '" + dir + "'");
+            // Use ls -lR to get all files with metadata in one command (recursive).
+            // Quote directory path to handle spaces in directory names.
+            ProcessBuilder pb = new ProcessBuilder(adbCommand, "-s", device, "shell", "ls -lR '" + dir + "'");
             Process process = pb.start();
             BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream())
             );
 
             String line;
-            int lineCount = 0;
+            String currentDir = dir;
             while ((line = reader.readLine()) != null) {
-                lineCount++;
-                // Skip first line (total) and empty lines
-                if (lineCount == 1 || line.trim().isEmpty()) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+
+                // Directory header emitted by ls -lR looks like "/path/to/dir:"
+                if (trimmed.endsWith(":") && !trimmed.startsWith("-") && !trimmed.startsWith("d")) {
+                    currentDir = trimmed.substring(0, trimmed.length() - 1);
+                    continue;
+                }
+
+                // Skip "total N" lines that precede each directory listing
+                if (trimmed.startsWith("total ")) {
                     continue;
                 }
 
                 // Fast path: only process if line likely contains photo extension
-                String lowerLine = line.toLowerCase();
-                if (!isMediaFile(lowerLine)) {
+                if (!isMediaFile(line.toLowerCase())) {
                     continue;
                 }
 
@@ -235,7 +261,7 @@ public class AndroidPhone {
                                     java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME
                             );
 
-                            String fullPath = dir + "/" + filename;
+                            String fullPath = currentDir + "/" + filename;
                             photoFiles.add(new PhotoFile(filename, fullPath, modTime, size, device));
                         } catch (Exception e) {
                             // Skip this file, invalid datetime
