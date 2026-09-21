@@ -920,6 +920,7 @@ public class PrintMediaLocation {
         }
         if (parts.stream().anyMatch(PrintMediaLocation::hasLatinLetter)) {
             parts.removeIf(part -> !hasLatinLetter(part));
+            parts.replaceAll(PrintMediaLocation::latinScriptText);
         }
         return parts;
     }
@@ -984,6 +985,7 @@ public class PrintMediaLocation {
 
         if (parts.stream().anyMatch(PrintMediaLocation::hasLatinLetter)) {
             parts.removeIf(part -> !hasLatinLetter(part));
+            parts.replaceAll(PrintMediaLocation::latinScriptText);
         }
         return parts;
     }
@@ -1052,6 +1054,29 @@ public class PrintMediaLocation {
             i += Character.charCount(cp);
         }
         return false;
+    }
+
+    static String latinScriptText(String value) {
+        StringBuilder cleaned = new StringBuilder(value.length());
+        boolean previousWasLatinLetter = false;
+        for (int i = 0; i < value.length(); ) {
+            int cp = value.codePointAt(i);
+            int type = Character.getType(cp);
+            boolean latinLetter = Character.isLetter(cp)
+                    && Character.UnicodeScript.of(cp) == Character.UnicodeScript.LATIN;
+            boolean combiningMark = type == Character.NON_SPACING_MARK
+                    || type == Character.COMBINING_SPACING_MARK
+                    || type == Character.ENCLOSING_MARK;
+
+            if (latinLetter || !Character.isLetter(cp) && (!combiningMark || previousWasLatinLetter)) {
+                cleaned.appendCodePoint(cp);
+            } else if (!cleaned.isEmpty() && !Character.isWhitespace(cleaned.charAt(cleaned.length() - 1))) {
+                cleaned.append(' ');
+            }
+            previousWasLatinLetter = latinLetter || (combiningMark && previousWasLatinLetter);
+            i += Character.charCount(cp);
+        }
+        return cleaned.toString().replaceAll("\\s+", " ").strip();
     }
 
     private static String firstNonBlank(String... values) {

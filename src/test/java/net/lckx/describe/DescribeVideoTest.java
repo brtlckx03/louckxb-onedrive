@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Random;
+import java.util.Scanner;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -49,6 +50,30 @@ class DescribeVideoTest {
         assertNull(options.addPersonRequest());
         assertFalse(options.keepFrames());
         assertFalse(options.showFrameDetails());
+    }
+
+    @Test
+    void parseOptions_allowsMissingVideoForInteractivePrompt() {
+        DescribeVideo.Options options = DescribeVideo.parseOptions(new String[0], null, null);
+
+        assertNull(options.videoPath());
+    }
+
+    @Test
+    void promptForVideoPath_acceptsQuotedPath() {
+        Path path = DescribeVideo.promptForVideoPath(new Scanner("\"My Videos/holiday.mp4\"\n"));
+
+        assertEquals(Path.of("My Videos/holiday.mp4"), path);
+    }
+
+    @Test
+    void promptForVideoPath_rejectsEndOfInput() {
+        DescribeVideo.UsageException exception = assertThrows(
+                DescribeVideo.UsageException.class,
+                () -> DescribeVideo.promptForVideoPath(new Scanner(""))
+        );
+
+        assertEquals("Missing video file.", exception.getMessage());
     }
 
     @Test

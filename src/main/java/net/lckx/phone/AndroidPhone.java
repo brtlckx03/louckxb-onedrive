@@ -215,6 +215,7 @@ public class AndroidPhone {
 
             String line;
             String currentDir = dir;
+            boolean currentDirIsSent = isSentDir(currentDir);
             while ((line = reader.readLine()) != null) {
                 String trimmed = line.trim();
                 if (trimmed.isEmpty()) {
@@ -224,6 +225,12 @@ public class AndroidPhone {
                 // Directory header emitted by ls -lR looks like "/path/to/dir:"
                 if (trimmed.endsWith(":") && !trimmed.startsWith("-") && !trimmed.startsWith("d")) {
                     currentDir = trimmed.substring(0, trimmed.length() - 1);
+                    currentDirIsSent = isSentDir(currentDir);
+                    continue;
+                }
+
+                // Skip WhatsApp "Sent" folders — user wants received media only
+                if (currentDirIsSent) {
                     continue;
                 }
 
@@ -309,6 +316,15 @@ public class AndroidPhone {
             // Fall through to default
         }
         return LocalDateTime.now();
+    }
+
+    /**
+     * WhatsApp stores media the user sent under a "Sent/" subfolder of each media root
+     * (e.g. .../WhatsApp Images/Sent, .../WhatsApp Video/Sent). Received media sits directly
+     * in the parent folder. Excluding "Sent/" therefore keeps only incoming media.
+     */
+    private static boolean isSentDir(String path) {
+        return path.endsWith("/Sent") || path.contains("/Sent/");
     }
 
     /**

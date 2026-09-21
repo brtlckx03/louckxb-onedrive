@@ -66,6 +66,8 @@ public class DownloadGarminFiles {
 
     private static final Path TOKEN_FILE =
             Path.of(System.getProperty("user.home"), ".garmin-token");
+    private static final Path CREDENTIALS_FILE =
+            Path.of(System.getProperty("user.home"), ".garmin-credentials");
     private static final Path DOWNLOAD_DIR = Path.of("src/main/resources/garmin");
 
     private static final SecureRandom RNG = new SecureRandom();
@@ -195,10 +197,12 @@ public class DownloadGarminFiles {
 
     /**
      * Returns {email, password}. Never echoes the password.
-     * Order of sources: env vars first ({@code GARMIN_EMAIL}, {@code GARMIN_PASSWORD}), then a
-     * real terminal via {@link System#console()}. If neither is available (e.g. an IntelliJ
-     * "Run" configuration with no console), the user is told how to fix it and the process
-     * exits — we refuse to read a password through echoing input streams.
+     * Order of sources: env vars ({@code GARMIN_EMAIL}, {@code GARMIN_PASSWORD}), then a
+     * config file (~/.garmin-credentials, {@code email=...} / {@code password=...} properties,
+     * only honored if its permissions are not group/world readable), then a real terminal via
+     * {@link System#console()}. If none is available (e.g. an IntelliJ "Run" configuration with
+     * no console), the user is told how to fix it and the process exits — we refuse to read a
+     * password through echoing input streams.
      */
     private static String CREDENTIAL_SOURCE = "?";
 
@@ -209,21 +213,66 @@ public class DownloadGarminFiles {
             CREDENTIAL_SOURCE = "env vars GARMIN_EMAIL/GARMIN_PASSWORD";
             return new String[]{envEmail.trim(), envPassword};
         }
+        String[] fromFile = readCredentialsFromFile();
+        if (fromFile != null) {
+            CREDENTIAL_SOURCE = "config file " + CREDENTIALS_FILE;
+            return fromFile;
+        }
         Console console = System.console();
         if (console == null) {
             System.err.println("""
                     No secure input available.
                     Either:
                       • Run this from a real terminal (Terminal.app / iTerm), OR
-                      • Set the GARMIN_EMAIL and GARMIN_PASSWORD environment variables.
+                      • Set the GARMIN_EMAIL and GARMIN_PASSWORD environment variables, OR
+                      • Create %s with "email=..." and "password=..." lines (chmod 600).
                     In IntelliJ: Run > Edit Configurations > Environment variables.
-                    """);
+                    """.formatted(CREDENTIALS_FILE));
             System.exit(1);
         }
         CREDENTIAL_SOURCE = "interactive console";
         String email = console.readLine("Garmin email: ").trim();
         char[] pw = console.readPassword("Garmin password: ");
         return new String[]{email, new String(pw)};
+    }
+
+    /**
+     * Reads email/password from {@link #CREDENTIALS_FILE} if present. The file must be a
+     * simple {@code key=value} properties file with {@code email} and {@code password} keys.
+     * Refuses to use it if permissions allow group/world access, to avoid leaking the
+     * plaintext password.
+     */
+    private static String[] readCredentialsFromFile() {
+        if (!Files.isRegularFile(CREDENTIALS_FILE)) return null;
+        try {
+            var perms = Files.getPosixFilePermissions(CREDENTIALS_FILE);
+            boolean tooOpen = perms.stream().anyMatch(p -> p.name().startsWith("GROUP") || p.name().startsWith("OTHERS"));
+            if (tooOpen) {
+                System.err.printf(
+                        "Ignoring %s: permissions are too open (run `chmod 600 %s`).%n",
+                        CREDENTIALS_FILE, CREDENTIALS_FILE);
+                return null;
+            }
+        } catch (UnsupportedOperationException e) {
+            // Non-POSIX filesystem (e.g. Windows); skip the permission check.
+        } catch (IOException e) {
+            System.err.println("Could not check permissions on " + CREDENTIALS_FILE + ": " + e.getMessage());
+            return null;
+        }
+        java.util.Properties props = new java.util.Properties();
+        try (var in = Files.newInputStream(CREDENTIALS_FILE)) {
+            props.load(in);
+        } catch (IOException e) {
+            System.err.println("Could not read " + CREDENTIALS_FILE + ": " + e.getMessage());
+            return null;
+        }
+        String email = props.getProperty("email");
+        String password = props.getProperty("password");
+        if (email == null || email.isBlank() || password == null || password.isBlank()) {
+            System.err.println(CREDENTIALS_FILE + " is missing 'email' or 'password'.");
+            return null;
+        }
+        return new String[]{email.trim(), password};
     }
 
     private static String[] browserHeaders(String referer) {

@@ -28,6 +28,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Random;
+import java.util.Scanner;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
@@ -92,6 +93,9 @@ public class DescribeVideo {
                 ensureCommandAvailable("ffmpeg", "Install ffmpeg first, for example: brew install ffmpeg");
                 addKnownPerson(options.peopleDir(), options.addPersonRequest());
                 return 0;
+            }
+            if (options.videoPath() == null) {
+                options = options.withVideoPath(promptForVideoPath(new Scanner(System.in)));
             }
             validateVideoPath(options.videoPath());
             ensureCommandAvailable("ffmpeg", "Install ffmpeg first, for example: brew install ffmpeg");
@@ -457,9 +461,6 @@ public class DescribeVideo {
         if (addPersonRequest != null && videoPath != null) {
             throw new UsageException("--add-person is a standalone command and cannot be combined with a video file.");
         }
-        if (addPersonRequest == null && videoPath == null) {
-            throw new UsageException("Missing video file.");
-        }
         if (frameCountExplicit && sampleEverySeconds != null) {
             throw new UsageException("Use either --frames or --sample-every-seconds, not both.");
         }
@@ -572,6 +573,25 @@ public class DescribeVideo {
 
     private static String expandHome(String value) {
         return expandHomePath(value).toString();
+    }
+
+    static Path promptForVideoPath(Scanner scanner) {
+        while (true) {
+            System.out.print("Video file: ");
+            System.out.flush();
+            if (!scanner.hasNextLine()) {
+                throw new UsageException("Missing video file.");
+            }
+            String input = scanner.nextLine().trim();
+            if (input.length() >= 2 && ((input.startsWith("\"") && input.endsWith("\""))
+                    || (input.startsWith("'") && input.endsWith("'")))) {
+                input = input.substring(1, input.length() - 1).trim();
+            }
+            if (!input.isEmpty()) {
+                return expandHomePath(input);
+            }
+            System.out.println("Please enter a path to a video file (or press Ctrl+C to cancel).");
+        }
     }
 
     private static int parseFrameCount(String value) {
@@ -1185,7 +1205,7 @@ public class DescribeVideo {
     private static void printUsage() {
         System.out.println("""
                 Usage:
-                  java --enable-preview src/main/java/net/lckx/video/DescribeVideo.java <video-file> [options]
+                  java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java <video-file> [options]
 
                 Options:
                   --model <name>       Ollama vision model to use. Default: qwen2.5vl:7b
@@ -1234,7 +1254,7 @@ public class DescribeVideo {
                   OLLAMA_HOST          Overrides the default Ollama host
 
                 Example:
-                  java --enable-preview src/main/java/net/lckx/video/DescribeVideo.java ~/Movies/holiday.mp4 --frames 12 --details
+                  java --enable-preview src/main/java/net/lckx/describe/DescribeVideo.java ~/Movies/holiday.mp4 --frames 12 --details
                 """);
     }
 
@@ -1382,6 +1402,14 @@ public class DescribeVideo {
                    Path peopleDir, boolean savePersonCandidates, int maxPersonReferences, AddPersonRequest addPersonRequest, Integer sampleEverySeconds,
                    String personRecognition, String faceRecognitionPython, Path faceRecognitionScript, double faceRecognitionTolerance,
                    boolean randomSamples, Long randomSeed, boolean keepFrames, boolean showFrameDetails) {
+        Options withVideoPath(Path value) {
+            return new Options(value, model, ollamaHost, frameCount, imageWidth, requestTimeout, frameCountExplicit,
+                    imageWidthExplicit, autoTune, transcribeSpeech, transcribeSpeechExplicit, transcriber, speechModel, speechLanguage, speechTimeout,
+                    peopleDir, savePersonCandidates, maxPersonReferences, addPersonRequest, sampleEverySeconds,
+                    personRecognition, faceRecognitionPython, faceRecognitionScript, faceRecognitionTolerance,
+                    randomSamples, randomSeed, keepFrames, showFrameDetails);
+        }
+
         Options withTranscribeSpeech(boolean value) {
             return new Options(videoPath, model, ollamaHost, frameCount, imageWidth, requestTimeout, frameCountExplicit,
                     imageWidthExplicit, autoTune, value, true, transcriber, speechModel, speechLanguage, speechTimeout,

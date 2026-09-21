@@ -239,6 +239,21 @@ class PrintMediaLocationTest {
     }
 
     @Test
+    void composeLocation_removesNonLatinAliasesFromLatinParts() {
+        String body = """
+                {"display_name":"...","address":{
+                  "road":"Avenue des Almohades شارع الموحدين",
+                  "suburb":"Océan ⵍⵎⵓⵃⵉⵟ المحيط",
+                  "city":"Fez"
+                }}
+                """;
+
+        Optional<String> location = PrintMediaLocation.composeLocation(body);
+
+        assertEquals(Optional.of("Fez, Océan, Avenue des Almohades"), location);
+    }
+
+    @Test
     void composeLocation_keepsAllPartsWhenAllNonLatin() {
         String body = """
                 {"display_name":"เทศบาลนครเชียงใหม่ แขวงนครพิงค์","address":{

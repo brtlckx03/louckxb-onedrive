@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.time.LocalDate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReadFilesOnPhoneADBTest {
 
@@ -45,5 +47,17 @@ class ReadFilesOnPhoneADBTest {
         // Sunday -> stays in that same week (Mon 15 .. Sun 21)
         assertEquals("20260615-20260621",
                 ReadFilesOnPhoneADB.weekFolderName(LocalDate.of(2026, 6, 21)));
+    }
+
+    @Test
+    void isWhatsAppMedia_detectsLegacyAndScopedStoragePaths() {
+        assertTrue(ReadFilesOnPhoneADB.isWhatsAppMedia(
+                "/sdcard/WhatsApp/Media/WhatsApp Images/IMG-20260701-WA0002.jpg"));
+        assertTrue(ReadFilesOnPhoneADB.isWhatsAppMedia(
+                "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video/VID-20260701-WA0001.mp4"));
+        assertFalse(ReadFilesOnPhoneADB.isWhatsAppMedia(
+                "/sdcard/DCIM/Camera/IMG_20260623_154617.jpg"));
+        assertFalse(ReadFilesOnPhoneADB.isWhatsAppMedia(
+                "/sdcard/Pictures/Screenshots/Screenshot_20260623_154617_Connect.jpg"));
     }
 }

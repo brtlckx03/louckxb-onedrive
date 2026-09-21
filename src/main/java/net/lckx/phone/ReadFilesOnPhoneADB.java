@@ -270,25 +270,29 @@ public class ReadFilesOnPhoneADB {
                 AndroidPhone.PhotoFile photo = photos.get(i);
                 String weekFolder = weekFolderName(photo.modifiedDateTime().toLocalDate());
                 String targetName = datePrefixedFilename(photo.filename());
-                java.nio.file.Path weekPath = baseFolder.resolve(weekFolder);
+                String subFolder = isWhatsAppMedia(photo.remotePath()) ? "WA" : "";
+                java.nio.file.Path targetDir = subFolder.isEmpty()
+                        ? baseFolder.resolve(weekFolder)
+                        : baseFolder.resolve(weekFolder).resolve(subFolder);
+                String displayFolder = subFolder.isEmpty() ? weekFolder : weekFolder + "/" + subFolder;
                 String localPath;
 
                 try {
-                    java.nio.file.Files.createDirectories(weekPath);
-                    localPath = weekPath.resolve(targetName).toString();
+                    java.nio.file.Files.createDirectories(targetDir);
+                    localPath = targetDir.resolve(targetName).toString();
 
                     ProcessBuilder pb = new ProcessBuilder(adbCommand, "-s", photo.device(),
                             "pull", photo.remotePath(), localPath);
                     int exitCode = pb.start().waitFor();
 
                     if (exitCode == 0) {
-                        System.out.printf("  [%d/%d] Downloaded: %s/%s\n", i + 1, photos.size(), weekFolder, targetName);
+                        System.out.printf("  [%d/%d] Downloaded: %s/%s\n", i + 1, photos.size(), displayFolder, targetName);
                         successCount++;
                     } else {
-                        System.err.printf("  [%d/%d] Failed: %s/%s\n", i + 1, photos.size(), weekFolder, targetName);
+                        System.err.printf("  [%d/%d] Failed: %s/%s\n", i + 1, photos.size(), displayFolder, targetName);
                     }
                 } catch (Exception e) {
-                    System.err.printf("  [%d/%d] Error: %s/%s\n", i + 1, photos.size(), weekFolder, targetName);
+                    System.err.printf("  [%d/%d] Error: %s/%s\n", i + 1, photos.size(), displayFolder, targetName);
                 }
             }
 
@@ -304,6 +308,15 @@ public class ReadFilesOnPhoneADB {
     }
 
     private static final DateTimeFormatter WEEK_FMT = DateTimeFormatter.ofPattern("yyyyMMdd");
+
+    /**
+     * True when the file lives under any WhatsApp media root on the phone. Covers both the
+     * legacy path ({@code /sdcard/WhatsApp/...}) and the scoped-storage path
+     * ({@code /sdcard/Android/media/com.whatsapp/WhatsApp/...}).
+     */
+    static boolean isWhatsAppMedia(String remotePath) {
+        return remotePath.contains("/WhatsApp/") || remotePath.contains("com.whatsapp/");
+    }
 
     /** Returns "YYYYMMDD-YYYYMMDD" for the Monday..Sunday week containing {@code date}. */
     static String weekFolderName(LocalDate date) {
