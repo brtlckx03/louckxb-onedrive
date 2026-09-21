@@ -69,6 +69,7 @@ public class DownloadGarminFiles {
     private static final Path CREDENTIALS_FILE =
             Path.of(System.getProperty("user.home"), ".garmin-credentials");
     private static final Path DOWNLOAD_DIR = Path.of("src/main/resources/garmin");
+    private static final int WELLNESS_SCHEMA_VERSION = 2;
 
     private static final SecureRandom RNG = new SecureRandom();
     private static final HttpClient HTTP;
@@ -162,7 +163,9 @@ public class DownloadGarminFiles {
         }
         System.out.printf("Done. downloaded=%d skipped=%d failed=%d%n", downloaded, skipped, failed);
 
-        System.out.println("Fetching daily training snapshots (VO2max, race predictions, training status)...");
+        System.out.println("Fetching daily wellness and training snapshots...");
+        token = ensureFreshToken(token);
+        String displayName = getDisplayName(token);
         int wOk = 0, wSkip = 0, wFail = 0;
         for (LocalDate day = since; !day.isAfter(until); day = day.plusDays(1)) {
             Path dir = DOWNLOAD_DIR
@@ -171,14 +174,14 @@ public class DownloadGarminFiles {
                     .resolve("wellness");
             Files.createDirectories(dir);
             Path target = dir.resolve(day + ".json");
-            if (Files.exists(target)) {
+            if (isCurrentWellnessSnapshot(target)) {
                 wSkip++;
                 continue;
             }
             try {
                 token = ensureFreshToken(token);
-                String snapshot = fetchDailySnapshot(token, day);
-                Files.writeString(target, snapshot);
+                String snapshot = fetchDailySnapshot(token, displayName, day);
+                writeAtomically(target, snapshot);
                 wOk++;
                 System.out.printf("  wellness %s%n", day);
                 Thread.sleep(150);
@@ -425,37 +428,129 @@ public class DownloadGarminFiles {
     }
 
     /**
-     * Combined per-day training-state snapshot: VO2max, race predictions, training status.
-     * Missing metrics (e.g. no VO2max because no running that day) come back as {@code null}
-     * rather than aborting the day.
+     * Combined raw per-day wellness and training snapshot. Missing device-gated metrics come
+     * back as {@code null} rather than aborting the day.
      */
-    private static String fetchDailySnapshot(Token token, LocalDate day) throws Exception {
+    private static String fetchDailySnapshot(Token token, String displayName, LocalDate day)
+            throws Exception {
+        String encodedDisplayName = encodePathSegment(displayName);
+        String dailySummary = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/usersummary-service/usersummary/daily/" + encodedDisplayName
+                        + "?calendarDate=" + day);
+        String sleep = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/wellness-service/wellness/dailySleepData/" + encodedDisplayName
+                        + "?date=" + day + "&nonSleepBufferMinutes=60");
+        String hrv = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/hrv-service/hrv/" + day);
+        String stress = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/wellness-service/wellness/dailyStress/" + day);
+        String bodyBattery = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/wellness-service/wellness/bodyBattery/reports/daily"
+                        + "?startDate=" + day + "&endDate=" + day);
+        String bodyBatteryEvents = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/wellness-service/wellness/bodyBattery/events/" + day);
+        String heartRate = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/wellness-service/wellness/dailyHeartRate/" + encodedDisplayName
+                        + "?date=" + day);
+        String respiration = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/wellness-service/wellness/daily/respiration/" + day);
+        String spo2 = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/wellness-service/wellness/daily/spo2/" + day);
+        String intensityMinutes = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/wellness-service/wellness/daily/im/" + day);
         String vo2 = bearerGetJsonOrNull(token,
                 CONNECTAPI + "/metrics-service/metrics/maxmet/latest/" + day);
         String race = bearerGetJsonOrNull(token,
                 CONNECTAPI + "/metrics-service/metrics/prediction/latest/" + day);
         String status = bearerGetJsonOrNull(token,
                 CONNECTAPI + "/metrics-service/metrics/trainingstatus/aggregated/" + day);
+        String readiness = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/metrics-service/metrics/trainingreadiness/" + day);
+        String enduranceScore = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/metrics-service/metrics/endurancescore?calendarDate=" + day);
+        String hillScore = bearerGetJsonOrNull(token,
+                CONNECTAPI + "/metrics-service/metrics/hillscore?calendarDate=" + day);
         return "{\n"
+                + "  \"schemaVersion\": " + WELLNESS_SCHEMA_VERSION + ",\n"
                 + "  \"date\": \"" + day + "\",\n"
+                + "  \"dailySummary\": " + dailySummary + ",\n"
+                + "  \"sleep\": " + sleep + ",\n"
+                + "  \"hrv\": " + hrv + ",\n"
+                + "  \"stress\": " + stress + ",\n"
+                + "  \"bodyBattery\": " + bodyBattery + ",\n"
+                + "  \"bodyBatteryEvents\": " + bodyBatteryEvents + ",\n"
+                + "  \"heartRate\": " + heartRate + ",\n"
+                + "  \"respiration\": " + respiration + ",\n"
+                + "  \"spo2\": " + spo2 + ",\n"
+                + "  \"intensityMinutes\": " + intensityMinutes + ",\n"
                 + "  \"vo2max\": " + vo2 + ",\n"
                 + "  \"racePrediction\": " + race + ",\n"
-                + "  \"trainingStatus\": " + status + "\n"
+                + "  \"trainingStatus\": " + status + ",\n"
+                + "  \"trainingReadiness\": " + readiness + ",\n"
+                + "  \"enduranceScore\": " + enduranceScore + ",\n"
+                + "  \"hillScore\": " + hillScore + "\n"
                 + "}\n";
     }
 
+    private static String getDisplayName(Token token) throws Exception {
+        String profile = bearerGetJson(token,
+                CONNECTAPI + "/userprofile-service/socialProfile");
+        String displayName = jsonString(profile, "displayName");
+        if (displayName.isBlank()) {
+            throw new IOException("Garmin profile did not contain displayName");
+        }
+        return displayName;
+    }
+
+    private static boolean isCurrentWellnessSnapshot(Path target) {
+        if (!Files.isRegularFile(target)) return false;
+        try {
+            return Files.readString(target)
+                    .contains("\"schemaVersion\": " + WELLNESS_SCHEMA_VERSION);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static void writeAtomically(Path target, String content) throws IOException {
+        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+        try {
+            Files.writeString(tmp, content);
+            Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(tmp);
+        }
+    }
+
     private static String bearerGetJsonOrNull(Token token, String url) throws Exception {
+        HttpResponse<String> resp = bearerGetJsonResponse(token, url);
+        if (resp.statusCode() == 204 || resp.statusCode() == 404) return "null";
+        if (resp.statusCode() != 200) {
+            throw new IOException("Garmin API failed: " + resp.statusCode() + " "
+                    + trimForLog(resp.body()));
+        }
+        String body = resp.body() == null ? "" : resp.body().trim();
+        return body.isEmpty() ? "null" : body;
+    }
+
+    private static String bearerGetJson(Token token, String url) throws Exception {
+        HttpResponse<String> resp = bearerGetJsonResponse(token, url);
+        if (resp.statusCode() != 200) {
+            throw new IOException("Garmin API failed: " + resp.statusCode() + " "
+                    + trimForLog(resp.body()));
+        }
+        return resp.body();
+    }
+
+    private static HttpResponse<String> bearerGetJsonResponse(Token token, String url)
+            throws Exception {
         HttpRequest req = HttpRequest.newBuilder(URI.create(url))
                 .header("Authorization", "Bearer " + token.accessToken)
                 .header("User-Agent", APP_UA)
                 .header("Accept", "application/json")
                 .GET().build();
-        HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() == 200) {
-            String body = resp.body() == null ? "" : resp.body().trim();
-            return body.isEmpty() ? "null" : body;
-        }
-        return "null";
+        return HTTP.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
     private static void bearerGetToFile(Token token, String url, String accept, Path target)
@@ -815,6 +910,10 @@ public class DownloadGarminFiles {
 
     private static String urlEncode(String s) {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
+    private static String encodePathSegment(String s) {
+        return urlEncode(s).replace("+", "%20");
     }
 
     private static String encodeQuery(Map<String, String> params) {
