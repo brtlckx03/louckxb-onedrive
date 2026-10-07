@@ -69,7 +69,7 @@ public class DownloadGarminFiles {
     private static final Path CREDENTIALS_FILE =
             Path.of(System.getProperty("user.home"), ".garmin-credentials");
     private static final Path DOWNLOAD_DIR = Path.of("src/main/resources/garmin");
-    private static final int WELLNESS_SCHEMA_VERSION = 2;
+    private static final int WELLNESS_SCHEMA_VERSION = 3;
 
     private static final SecureRandom RNG = new SecureRandom();
     private static final HttpClient HTTP;
@@ -101,7 +101,7 @@ public class DownloadGarminFiles {
             }
         }
         LocalDate today = LocalDate.now();
-        LocalDate defaultSince = today.withDayOfMonth(1);
+        LocalDate defaultSince = today.minusDays(30);
         if (since == null) since = promptForDate("--since date (YYYY-MM-DD)", defaultSince);
         if (until == null) until = promptForDate("--until date (YYYY-MM-DD)", today);
         Files.createDirectories(DOWNLOAD_DIR);
@@ -301,9 +301,12 @@ public class DownloadGarminFiles {
         return out;
     }
 
+    /** Shared so consecutive prompts don't lose input buffered by an earlier Scanner. */
+    private static final Scanner STDIN = new Scanner(System.in);
+
     private static LocalDate promptForDate(String label, LocalDate defaultValue) {
         Console console = System.console();
-        Scanner scanner = new Scanner(System.in);
+        Scanner scanner = STDIN;
         String prompt = label + " [" + defaultValue + "]: ";
         while (true) {
             String input;
@@ -459,7 +462,7 @@ public class DownloadGarminFiles {
         String intensityMinutes = bearerGetJsonOrNull(token,
                 CONNECTAPI + "/wellness-service/wellness/daily/im/" + day);
         String vo2 = bearerGetJsonOrNull(token,
-                CONNECTAPI + "/metrics-service/metrics/maxmet/latest/" + day);
+                CONNECTAPI + "/metrics-service/metrics/maxmet/daily/" + day + "/" + day);
         String race = bearerGetJsonOrNull(token,
                 CONNECTAPI + "/metrics-service/metrics/prediction/latest/" + day);
         String status = bearerGetJsonOrNull(token,
