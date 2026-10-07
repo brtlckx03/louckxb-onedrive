@@ -46,15 +46,14 @@ import java.util.stream.Stream;
  *
  * <p>Usage: {@code DescribeGarminFile [FROM [UNTIL]] [--since D] [--until D] [--out report.html] [--open]}.
  * Without dates it asks for a from/until date, defaulting to the latest day that has an activity. Every day in
- * the range that has files gets a report in {@code src/main/resources/garmin_reports/<yyyy>/<mm>/<date>.html};
- * the overview {@code index.html} is rebuilt once at the end.
+ * the range that has files gets a report next to its data in {@code src/main/resources/garmin/<yyyy>/<mm>/<date>-report.html};
+ * the overview {@code src/main/resources/garmin/index.html} is rebuilt once at the end.
  *
  * User: louckxb, Date: 06/10/2026.
  */
 public class DescribeGarminFile {
 
     private static final Path DATA_DIR = Path.of("src/main/resources/garmin");
-    private static final Path REPORT_DIR = Path.of("src/main/resources/garmin_reports");
     private static final String OVERVIEW_FILE = "index.html";
     private static final String SUMMARY_START = "<script type=\"application/json\" id=\"garmin-summary\">";
     private static final Pattern ACTIVITY_FILE =
@@ -88,7 +87,13 @@ public class DescribeGarminFile {
         if (since == null && !positional.isEmpty()) since = positional.getFirst();
         if (until == null && positional.size() == 2) until = positional.get(1);
 
-        LocalDate latest = latestDate().orElseThrow(() -> new IllegalStateException("No Garmin files found in " + DATA_DIR));
+        Optional<LocalDate> latestData = latestDate();
+        if (latestData.isEmpty()) {
+            System.err.println("No Garmin files found in " + DATA_DIR.toAbsolutePath()
+                    + "\nRun DownloadGarminFiles first; it writes the day reports and the overview when it finishes.");
+            System.exit(1);
+        }
+        LocalDate latest = latestData.get();
         if (since == null) {
             since = promptForDate("From date (YYYY-MM-DD)", latest);
             until = promptForDate("Until date (YYYY-MM-DD)", since);
@@ -108,19 +113,15 @@ public class DescribeGarminFile {
         }
 
         Path lastReport = null;
-        int written = 0, empty = 0;
-        for (LocalDate date = since; !date.isAfter(until); date = date.plusDays(1)) {
-            Path report = writeReport(date, single ? out : null);
-            if (report == null) {
-                empty++;
-                if (single) System.err.println("No Garmin files found for " + date);
-            } else {
-                written++;
-                lastReport = report;
+        if (single) {
+            lastReport = writeReport(since, out);
+            if (lastReport == null) {
+                System.err.println("No Garmin files found for " + since);
+                System.exit(1);
             }
+        } else if (writeReports(since, until) == 0) {
+            System.exit(1);
         }
-        if (!single) System.out.printf("Done: %d reports written, %d days without data skipped (%s → %s).%n", written, empty, since, until);
-        if (written == 0) System.exit(1);
         Path overview = Overview.write();
         System.out.println("Overview updated: " + overview.toAbsolutePath());
         if (open) {
@@ -138,24 +139,50 @@ public class DescribeGarminFile {
                 Options: --open  open the report (one day) or the overview (range) when done""");
     }
 
-    /** Writes the report for one day; returns its path, or null when there are no files for that day. */
-    private static Path writeReport(LocalDate date, Path out) throws IOException {
-        Day day = loadDay(date);
-        if (day.activities.isEmpty() && day.wellness == null) return null;
-        if (out == null) {
-            out = REPORT_DIR
-                    .resolve(String.valueOf(date.getYear()))
-                    .resolve(String.format("%02d", date.getMonthValue()))
-                    .resolve(date + ".html");
+    /**
+     * Writes the reports for every day in the range that has data (also used by {@link DownloadGarminFiles}).
+     * Does not rebuild the overview; call {@link Overview#write()} afterwards. Returns the number written.
+     */
+    static int writeReports(LocalDate since, LocalDate until) throws IOException {
+        int written = 0, empty = 0;
+        for (LocalDate date = since; !date.isAfter(until); date = date.plusDays(1)) {
+            if (writeReport(date, null) == null) empty++;
+            else written++;
         }
-        if (out.getParent() != null) Files.createDirectories(out.getParent());
-        Path dir = out.toAbsolutePath().getParent();
-        String overviewHref = dir.relativize(REPORT_DIR.toAbsolutePath().resolve(OVERVIEW_FILE)).toString();
-        String html = new Report(day, overviewHref).render();
-        Files.writeString(out, html, StandardCharsets.UTF_8);
+        System.out.printf("Reports: %d written, %d days without data skipped (%s → %s).%n", written, empty, since, until);
+        return written;
+    }
+
+    /** A day report is stored next to the downloaded files, e.g. garmin/2026/02/2026-02-01-report.html. */
+    static Path reportPath(LocalDate date) {
+        return DATA_DIR
+                .resolve(String.valueOf(date.getYear()))
+                .resolve(String.format("%02d", date.getMonthValue()))
+                .resolve(date + "-report.html");
+    }
+
+    /** Writes the report for one day; returns its path, or null when there are no files for that day. */
+    static Path writeReport(LocalDate date, Path out) throws IOException {
+        Day day = loadDay(date);
+        Path defaultOut = reportPath(date);
+        if (day.activities.isEmpty() && day.wellness == null) {
+            // A report generated earlier (e.g. from an empty wellness snapshot) no longer has anything to show.
+            if (out == null && Files.deleteIfExists(defaultOut)) System.out.println("Removed report without data: " + defaultOut);
+            return null;
+        }
+        if (out == null) out = defaultOut;
+        writeHtml(day, out);
         System.out.printf("Report for %s (%d activities, wellness=%s) written to %s%n",
                 date, day.activities.size(), day.wellness != null ? "yes" : "no", out.toAbsolutePath());
         return out;
+    }
+
+    private static void writeHtml(Day day, Path out) throws IOException {
+        if (out.getParent() != null) Files.createDirectories(out.getParent());
+        // The "All reports" link is relative, so it is computed for each location the page is written to.
+        String overviewHref = out.toAbsolutePath().getParent()
+                .relativize(DATA_DIR.toAbsolutePath().resolve(OVERVIEW_FILE)).toString();
+        Files.writeString(out, new Report(day, overviewHref).render(), StandardCharsets.UTF_8);
     }
 
     /** Shared so consecutive prompts don't lose input buffered by an earlier Scanner. */
@@ -250,9 +277,12 @@ public class DescribeGarminFile {
         day.activities.sort(Comparator.comparing(a -> a.start == null ? Instant.MAX : a.start));
         Path w = monthDir.resolve("wellness").resolve(date + ".json");
         if (Files.exists(w)) {
-            day.wellnessFile = w;
             try {
-                day.wellness = asMap(Json.parse(Files.readString(w)));
+                String text = Files.readString(w);
+                // Snapshots for days without any recording (e.g. before the first watch) are ignored.
+                if (!DownloadGarminFiles.hasWellnessData(text)) return day;
+                day.wellnessFile = w;
+                day.wellness = asMap(Json.parse(text));
             } catch (RuntimeException ex) {
                 System.err.println("Could not parse " + w + ": " + ex.getMessage());
             }
@@ -1052,7 +1082,9 @@ public class DescribeGarminFile {
                 Object v = e.getValue();
                 if (v == null || v instanceof List<?> l && l.isEmpty()) continue;
                 if (!(v instanceof Map || v instanceof List)) continue;
-                details(humanize(e.getKey()), "Wellness", file + " → " + e.getKey(), () -> tree(v, 0));
+                boolean staleVo2 = e.getKey().equals("vo2max") && vo2maxEntries(w).stream().anyMatch(Vo2Entry::stale);
+                details(humanize(e.getKey()) + (staleVo2 ? " — ⚠ not from this day (latest value at download time)" : ""),
+                        "Wellness", file + " → " + e.getKey(), () -> tree(v, 0));
             }
             List<String> empty = new ArrayList<>();
             for (var e : w.entrySet()) {
@@ -1260,14 +1292,32 @@ public class DescribeGarminFile {
             Map<String, Object> ts = asMap(w.get("trainingStatus"));
             Map<String, Object> es = asMap(w.get("enduranceScore"));
             Map<String, Object> hs = asMap(w.get("hillScore"));
-            if (ts == null && es == null && hs == null) return;
+            List<Vo2Entry> vo2Entries = vo2maxEntries(w);
+            boolean stale = vo2Entries.stream().anyMatch(Vo2Entry::stale);
+            if (ts == null && es == null && hs == null && vo2Entries.isEmpty()) return;
+            int start = h.length();
             h.append("<h3>Fitness &amp; training status</h3>");
+            int afterHeader = h.length();
+            if (stale) {
+                h.append("<p class=\"warn\">⚠ The <code>vo2max</code> section of this file is <b>not from this day</b>: it holds ")
+                        .append(esc(String.join(", ", vo2Entries.stream().filter(Vo2Entry::stale)
+                                .map(v -> humanize(v.sport) + " " + fmtNum(v.value, 1) + " measured " + v.date).toList())))
+                        .append(". The file was downloaded with an older DownloadGarminFiles that asked Garmin for the <i>latest</i> VO₂ max ")
+                        .append("instead of the value on this date, so it is ignored here. Run DownloadGarminFiles again for this period to replace it.</p>");
+            }
             tiles(() -> {
+                for (Vo2Entry v : vo2Entries) {
+                    if (v.stale) continue;
+                    tile(fmtNum(v.value, 1), "VO₂ max " + (v.sport.equals("generic") ? "running" : v.sport) + " <small>(measured this day)</small>",
+                            "vo2max." + v.sport + ".vo2MaxPreciseValue, calendarDate " + v.date, "Wellness");
+                }
                 Map<String, Object> vo2 = asMap(at(ts, "mostRecentVO2Max"));
                 if (vo2 != null) {
                     for (String k : List.of("generic", "cycling")) {
                         Double v = num(at(vo2, k, "vo2MaxPreciseValue"));
-                        if (v != null) tile(fmtNum(v, 1), "VO₂ max " + (k.equals("generic") ? "running" : k) + " <small>(" + esc(str(at(vo2, k, "calendarDate"))) + ")</small>",
+                        String when = str(at(vo2, k, "calendarDate"));
+                        boolean shown = vo2Entries.stream().anyMatch(e -> !e.stale() && e.sport().equals(k) && e.date().equals(when));
+                        if (v != null && !shown) tile(fmtNum(v, 1), "VO₂ max " + (k.equals("generic") ? "running" : k) + " <small>(" + esc(str(at(vo2, k, "calendarDate"))) + ")</small>",
                                 "trainingStatus.mostRecentVO2Max." + k, "Wellness");
                     }
                 }
@@ -1314,6 +1364,30 @@ public class DescribeGarminFile {
                 }
                 h.append("</div>");
             }
+            if (h.length() == afterHeader) h.setLength(start);
+        }
+
+        record Vo2Entry(String sport, double value, String date, boolean stale) {}
+
+        /**
+         * VO₂ max values in the snapshot's {@code vo2max} section. Current files hold a list of that day's measurements;
+         * files from older downloaders hold one object with the account's latest values, usually from another date.
+         */
+        List<Vo2Entry> vo2maxEntries(Map<String, Object> w) {
+            List<Vo2Entry> out = new ArrayList<>();
+            Object v = w.get("vo2max");
+            List<Object> items = v instanceof List<?> ? asList(v) : v instanceof Map ? List.of(v) : List.of();
+            String day = str(w.get("date"));
+            for (Object item : items) {
+                for (String sport : List.of("generic", "cycling")) {
+                    Double val = num(at(item, sport, "vo2MaxPreciseValue"));
+                    if (val == null) val = num(at(item, sport, "vo2MaxValue"));
+                    String date = str(at(item, sport, "calendarDate"));
+                    if (val == null) continue;
+                    out.add(new Vo2Entry(sport, val, date, !date.isEmpty() && !date.equals(day)));
+                }
+            }
+            return out;
         }
 
         String enduranceClass(Map<String, Object> es) {
@@ -1563,37 +1637,65 @@ public class DescribeGarminFile {
 
     // ------------------------------------------------------------------ overview
 
-    /** Rebuilds {@code garmin_reports/index.html} from the summaries embedded in every day report. */
+    /** Rebuilds {@code garmin/index.html} from the summaries embedded in every day report. */
     static final class Overview {
-        private static final Pattern REPORT_NAME = Pattern.compile("\\d{4}-\\d{2}-\\d{2}\\.html");
+        private static final Pattern REPORT_NAME = Pattern.compile("\\d{4}-\\d{2}-\\d{2}-report\\.html");
 
         record Entry(LocalDate date, String href, Map<String, Object> summary) {}
 
+        /** Summaries of all reports, kept after the first scan so {@link #update} only reads the changed day. */
+        private static TreeMap<LocalDate, Entry> cache;
+
+        /** Rebuilds the overview from every report on disk. */
         static Path write() throws IOException {
-            List<Entry> entries = new ArrayList<>();
-            if (Files.isDirectory(REPORT_DIR)) {
-                try (Stream<Path> s = Files.walk(REPORT_DIR)) {
+            cache = new TreeMap<>();
+            if (Files.isDirectory(DATA_DIR)) {
+                try (Stream<Path> s = Files.walk(DATA_DIR)) {
                     for (Path p : (Iterable<Path>) s::iterator) {
                         if (!REPORT_NAME.matcher(p.getFileName().toString()).matches()) continue;
                         LocalDate d = LocalDate.parse(p.getFileName().toString().substring(0, 10));
-                        String href = REPORT_DIR.relativize(p).toString().replace('\\', '/');
-                        entries.add(new Entry(d, href, readSummary(p)));
+                        cache.put(d, entry(d, p));
                     }
                 }
             }
-            entries.sort(Comparator.comparing(Entry::date).reversed());
-            Path out = REPORT_DIR.resolve(OVERVIEW_FILE);
-            Files.createDirectories(REPORT_DIR);
-            Files.writeString(out, render(entries), StandardCharsets.UTF_8);
+            return render();
+        }
+
+        /** Updates the overview for one day whose report was written or removed; scans everything the first time. */
+        static Path update(LocalDate date) throws IOException {
+            if (cache == null) return write();
+            Path p = reportPath(date);
+            if (Files.exists(p)) cache.put(date, entry(date, p));
+            else cache.remove(date);
+            return render();
+        }
+
+        private static Entry entry(LocalDate d, Path p) {
+            return new Entry(d, DATA_DIR.relativize(p).toString().replace('\\', '/'), readSummary(p));
+        }
+
+        private static Path render() throws IOException {
+            List<Entry> entries = new ArrayList<>(cache.descendingMap().values());
+            Path out = DATA_DIR.resolve(OVERVIEW_FILE);
+            Files.createDirectories(DATA_DIR);
+            Path tmp = out.resolveSibling(OVERVIEW_FILE + ".tmp");
+            Files.writeString(tmp, render(entries), StandardCharsets.UTF_8);
+            // Replace in one step, so a browser refreshing during a download never sees half a page.
+            Files.move(tmp, out, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
             return out;
         }
 
         private static Map<String, Object> readSummary(Path p) {
             try {
-                String html = Files.readString(p);
+                // The summary sits in <head>, so the first part of the file is enough (reports can be several MB).
+                String html;
+                try (var in = Files.newInputStream(p)) {
+                    html = new String(in.readNBytes(256 * 1024), StandardCharsets.UTF_8);
+                }
                 int i = html.indexOf(SUMMARY_START);
                 if (i < 0) return Map.of();
                 int j = html.indexOf("</script>", i);
+                if (j < 0) return Map.of();
                 Map<String, Object> m = asMap(Json.parse(html.substring(i + SUMMARY_START.length(), j).replace("<\\/", "</")));
                 return m == null ? Map.of() : m;
             } catch (Exception e) {
@@ -1633,7 +1735,7 @@ public class DescribeGarminFile {
                 for (Entry e : m.getValue()) row(h, e);
                 h.append("</tbody></table></div></section>");
             }
-            h.append("<footer>Click a column header to sort. Reports live in <code>").append(esc(REPORT_DIR.toString()))
+            h.append("<footer>Click a column header to sort. Reports live in <code>").append(esc(DATA_DIR.toString()))
                     .append("</code>.</footer></main><div id=\"tip\"></div><script>").append(JS)
                     .append("function filterRows(q){q=q.toLowerCase();document.querySelectorAll('section.month').forEach(function(s){")
                     .append("var any=false;s.querySelectorAll('tbody tr').forEach(function(r){var ok=r.textContent.toLowerCase().indexOf(q)>=0;")

@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -32,7 +33,9 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * Downloads TCX and GPX exports for Garmin Connect activities in a date range.
+ * Downloads Garmin Connect activities (TCX, GPX, FIT, JSON summary) and the daily wellness snapshot
+ * for a date range. Works day by day: each day's files are downloaded and its report is written
+ * (see {@link DescribeGarminFile}) before the next day starts; the overview is rebuilt at the end.
  *
  * <p>Auth: Garmin has no public OAuth flow. This impersonates the mobile app's SSO
  * exchange to obtain an OAuth2 bearer + refresh token (persisted to ~/.garmin-token).
@@ -82,7 +85,27 @@ public class DownloadGarminFiles {
                 .cookieHandler(cm)
                 .version(HttpClient.Version.HTTP_1_1)
                 .followRedirects(HttpClient.Redirect.NORMAL)
+                .connectTimeout(Duration.ofSeconds(30))
                 .build();
+    }
+
+    /** Garmin sometimes accepts a request and never answers; without a timeout the run hangs forever. */
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(60);
+    private static final Duration DOWNLOAD_TIMEOUT = Duration.ofMinutes(5);
+    private static final int ATTEMPTS = 3;
+
+    /** Sends an API request, retrying a few times when it times out or the connection drops. */
+    private static <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler) throws Exception {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                return HTTP.send(req, handler);
+            } catch (IOException e) {
+                if (attempt >= ATTEMPTS) throw e;
+                System.err.printf("  retry %d/%d after %s: %s%n", attempt, ATTEMPTS - 1,
+                        e.getClass().getSimpleName(), req.uri().getPath());
+                Thread.sleep(2000L * attempt);
+            }
+        }
     }
 
     static void main(String[] args) throws Exception {
@@ -118,79 +141,159 @@ public class DownloadGarminFiles {
             return;
         }
 
-        int downloaded = 0, skipped = 0, failed = 0;
-        for (Activity a : activities) {
-            String base = a.date + "_" + a.id + "_" + sanitize(a.name);
-            Path activityDir = DOWNLOAD_DIR
-                    .resolve(a.date.substring(0, 4))
-                    .resolve(a.date.substring(5, 7));
-            Files.createDirectories(activityDir);
-            Path tcx = activityDir.resolve(base + ".tcx");
-            Path gpx = activityDir.resolve(base + ".gpx");
-            Path fit = activityDir.resolve(base + ".fit");
-            Path json = activityDir.resolve(base + ".json");
-            if (Files.exists(tcx) && Files.exists(gpx) && Files.exists(fit) && Files.exists(json)) {
-                skipped++;
-                continue;
-            }
-            try {
-                token = ensureFreshToken(token);
-                if (!Files.exists(tcx)) {
-                    downloadExport(token, a.id, "tcx", tcx);
-                    downloaded++;
-                    System.out.printf("  [%d] %s.tcx%n", downloaded, base);
-                }
-                if (!Files.exists(gpx)) {
-                    downloadExport(token, a.id, "gpx", gpx);
-                    downloaded++;
-                    System.out.printf("  [%d] %s.gpx%n", downloaded, base);
-                }
-                if (!Files.exists(fit)) {
-                    downloadFit(token, a.id, fit);
-                    downloaded++;
-                    System.out.printf("  [%d] %s.fit%n", downloaded, base);
-                }
-                if (!Files.exists(json)) {
-                    downloadSummary(token, a.id, json);
-                    downloaded++;
-                    System.out.printf("  [%d] %s.json%n", downloaded, base);
-                }
-                Thread.sleep(250);
-            } catch (Exception e) {
-                System.err.printf("  FAILED activity %d (%s): %s%n", a.id, a.name, e.getMessage());
-                failed++;
-            }
-        }
-        System.out.printf("Done. downloaded=%d skipped=%d failed=%d%n", downloaded, skipped, failed);
-
-        System.out.println("Fetching daily wellness and training snapshots...");
-        token = ensureFreshToken(token);
-        String displayName = getDisplayName(token);
-        int wOk = 0, wSkip = 0, wFail = 0;
+        // Work day by day, so an interrupted run leaves complete days (files + report) behind.
+        Run run = new Run(token);
+        run.displayName = getDisplayName(run.token);
+        Map<String, List<Activity>> byDate = new TreeMap<>();
+        for (Activity a : activities) byDate.computeIfAbsent(a.date, k -> new ArrayList<>()).add(a);
         for (LocalDate day = since; !day.isAfter(until); day = day.plusDays(1)) {
-            Path dir = DOWNLOAD_DIR
-                    .resolve(String.valueOf(day.getYear()))
-                    .resolve(String.format("%02d", day.getMonthValue()))
-                    .resolve("wellness");
-            Files.createDirectories(dir);
-            Path target = dir.resolve(day + ".json");
-            if (isCurrentWellnessSnapshot(target)) {
-                wSkip++;
-                continue;
-            }
-            try {
-                token = ensureFreshToken(token);
-                String snapshot = fetchDailySnapshot(token, displayName, day);
-                writeAtomically(target, snapshot);
-                wOk++;
-                System.out.printf("  wellness %s%n", day);
-                Thread.sleep(150);
-            } catch (Exception e) {
-                System.err.printf("  FAILED wellness %s: %s%n", day, e.getMessage());
-                wFail++;
-            }
+            List<Activity> ofDay = byDate.remove(day.toString());
+            boolean changed = false;
+            if (ofDay != null) for (Activity a : ofDay) changed |= downloadActivity(run, a);
+            changed |= downloadWellness(run, day);
+            writeReportIfNeeded(run, day, changed);
         }
-        System.out.printf("Wellness done. ok=%d skipped=%d failed=%d%n", wOk, wSkip, wFail);
+        // Activities whose local start date falls outside the requested range (time zones) are still downloaded.
+        for (var e : byDate.entrySet()) {
+            boolean changed = false;
+            for (Activity a : e.getValue()) changed |= downloadActivity(run, a);
+            if (e.getKey().matches("\\d{4}-\\d{2}-\\d{2}")) writeReportIfNeeded(run, LocalDate.parse(e.getKey()), changed);
+        }
+        System.out.printf("Activities done. downloaded=%d skipped=%d failed=%d%n", run.downloaded, run.skipped, run.failed);
+        System.out.printf("Wellness done. ok=%d skipped=%d no-data=%d failed=%d%n", run.wOk, run.wSkip, run.wEmpty, run.wFail);
+        System.out.printf("Reports done. written=%d unchanged=%d%n", run.reports, run.reportsKept);
+        if (run.reports == 0) DescribeGarminFile.Overview.write();
+        System.out.println("Overview: " + DOWNLOAD_DIR.resolve("index.html").toAbsolutePath());
+    }
+
+    /** State shared by the per-day steps: the (refreshed) token and the counters for the final summary. */
+    private static final class Run {
+        Token token;
+        String displayName;
+        int downloaded, skipped, failed;
+        int wOk, wSkip, wEmpty, wFail;
+        int reports, reportsKept;
+
+        Run(Token token) {
+            this.token = token;
+        }
+    }
+
+    /**
+     * Rewrites a day's report only when its files changed in this run or the report doesn't exist yet,
+     * and then updates the overview so it is current after every day.
+     */
+    private static void writeReportIfNeeded(Run run, LocalDate day, boolean changed) throws IOException {
+        if (!changed && Files.exists(DescribeGarminFile.reportPath(day))) {
+            run.reportsKept++;
+            return;
+        }
+        boolean existed = Files.exists(DescribeGarminFile.reportPath(day));
+        boolean written = DescribeGarminFile.writeReport(day, null) != null;
+        if (written) run.reports++;
+        // Days without data have no report; only touch the overview when a row appears, changes or disappears.
+        if (written || existed) DescribeGarminFile.Overview.update(day);
+    }
+
+    /** Returns true when a file of the activity was downloaded. */
+    private static boolean downloadActivity(Run run, Activity a) throws Exception {
+        String base = a.date + "_" + a.id + "_" + sanitize(a.name);
+        Path activityDir = DOWNLOAD_DIR
+                .resolve(a.date.substring(0, 4))
+                .resolve(a.date.substring(5, 7));
+        Files.createDirectories(activityDir);
+        Path tcx = activityDir.resolve(base + ".tcx");
+        Path gpx = activityDir.resolve(base + ".gpx");
+        Path fit = activityDir.resolve(base + ".fit");
+        Path json = activityDir.resolve(base + ".json");
+        if (Files.exists(tcx) && Files.exists(gpx) && Files.exists(fit) && Files.exists(json)) {
+            run.skipped++;
+            return false;
+        }
+        try {
+            run.token = ensureFreshToken(run.token);
+            if (!Files.exists(tcx)) {
+                downloadExport(run.token, a.id, "tcx", tcx);
+                run.downloaded++;
+                System.out.printf("  [%d] %s.tcx%n", run.downloaded, base);
+            }
+            if (!Files.exists(gpx)) {
+                downloadExport(run.token, a.id, "gpx", gpx);
+                run.downloaded++;
+                System.out.printf("  [%d] %s.gpx%n", run.downloaded, base);
+            }
+            if (!Files.exists(fit)) {
+                downloadFit(run.token, a.id, fit);
+                run.downloaded++;
+                System.out.printf("  [%d] %s.fit%n", run.downloaded, base);
+            }
+            if (!Files.exists(json)) {
+                downloadSummary(run.token, a.id, json);
+                run.downloaded++;
+                System.out.printf("  [%d] %s.json%n", run.downloaded, base);
+            }
+            Thread.sleep(250);
+        } catch (Exception e) {
+            System.err.printf("  FAILED activity %d (%s): %s%n", a.id, a.name, e.getMessage());
+            run.failed++;
+        }
+        // Even after a failure, files downloaded before it are new for the report.
+        return true;
+    }
+
+    /** Returns true when the day's snapshot was written or removed. */
+    private static boolean downloadWellness(Run run, LocalDate day) {
+        Path dir = DOWNLOAD_DIR
+                .resolve(String.valueOf(day.getYear()))
+                .resolve(String.format("%02d", day.getMonthValue()))
+                .resolve("wellness");
+        Path target = dir.resolve(day + ".json");
+        // Today and yesterday are always fetched again: the watch may not have synced the whole day yet.
+        boolean recent = !day.isBefore(LocalDate.now().minusDays(1));
+        if (!recent && isCurrentWellnessSnapshot(target)) {
+            run.wSkip++;
+            return false;
+        }
+        try {
+            run.token = ensureFreshToken(run.token);
+            String snapshot = fetchDailySnapshot(run.token, run.displayName, day);
+            Thread.sleep(150);
+            if (!hasWellnessData(snapshot)) {
+                // Nothing recorded that day (e.g. before the first watch): don't keep an empty snapshot.
+                // An older-format file for this day only held the account's "latest" VO2 max, so drop it too.
+                boolean removed = Files.deleteIfExists(target);
+                if (removed) System.out.printf("  wellness %s: no data, removed old snapshot%n", day);
+                run.wEmpty++;
+                return removed;
+            }
+            Files.createDirectories(dir);
+            writeAtomically(target, snapshot);
+            run.wOk++;
+            System.out.printf("  wellness %s%n", day);
+            return true;
+        } catch (Exception e) {
+            System.err.printf("  FAILED wellness %s: %s%n", day, e.getMessage());
+            run.wFail++;
+            return false;
+        }
+    }
+
+    /** Signs that Garmin actually recorded something for the day; checked on the raw snapshot JSON. */
+    private static final List<Pattern> WELLNESS_DATA_SIGNS = List.of(
+            Pattern.compile("\"totalSteps\"\\s*:\\s*[1-9]"),
+            Pattern.compile("\"sleepTimeSeconds\"\\s*:\\s*[1-9]"),
+            Pattern.compile("\"heartRateValues\"\\s*:\\s*\\[\\s*\\["),
+            Pattern.compile("\"stressValuesArray\"\\s*:\\s*\\[\\s*\\["),
+            Pattern.compile("\"hrvSummary\"\\s*:\\s*\\{"),
+            Pattern.compile("\"overallScore\"\\s*:\\s*[1-9]"),
+            Pattern.compile("\"mostRecentVO2Max\"\\s*:\\s*\\{"),
+            Pattern.compile("\"trainingStatusFeedbackPhrase\"\\s*:\\s*\""));
+
+    static boolean hasWellnessData(String snapshot) {
+        for (Pattern p : WELLNESS_DATA_SIGNS) {
+            if (p.matcher(snapshot).find()) return true;
+        }
+        return false;
     }
 
     private static void printUsageAndExit() {
@@ -368,9 +471,10 @@ public class DownloadGarminFiles {
                     .header("Authorization", "Bearer " + token.accessToken)
                     .header("User-Agent", APP_UA)
                     .header("Accept", "application/json")
+                    .timeout(REQUEST_TIMEOUT)
                     .GET()
                     .build();
-            HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) {
                 throw new IOException("List activities failed: " + resp.statusCode() + " " + resp.body());
             }
@@ -552,18 +656,20 @@ public class DownloadGarminFiles {
                 .header("Authorization", "Bearer " + token.accessToken)
                 .header("User-Agent", APP_UA)
                 .header("Accept", "application/json")
+                .timeout(REQUEST_TIMEOUT)
                 .GET().build();
-        return HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+        return send(req, HttpResponse.BodyHandlers.ofString());
     }
 
     private static void bearerGetToFile(Token token, String url, String accept, Path target)
             throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
                 .header("Authorization", "Bearer " + token.accessToken)
-                .header("User-Agent", APP_UA);
+                .header("User-Agent", APP_UA)
+                .timeout(DOWNLOAD_TIMEOUT);
         if (accept != null) b.header("Accept", accept);
         Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
-        HttpResponse<Path> resp = HTTP.send(b.GET().build(), HttpResponse.BodyHandlers.ofFile(tmp));
+        HttpResponse<Path> resp = send(b.GET().build(), HttpResponse.BodyHandlers.ofFile(tmp));
         if (resp.statusCode() != 200) {
             String body = "";
             try {
