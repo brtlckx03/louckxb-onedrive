@@ -537,8 +537,12 @@ public class DescribeGarminFile {
         }
 
         void nav() {
-            if (day.activities.size() + (day.wellness != null ? 1 : 0) < 2) return;
-            h.append("<nav>");
+            // Sticky bar: back to the overview, plus jumps within the page when there is more than one section.
+            h.append("<nav><a class=\"home\" href=\"").append(esc(overviewHref.replace('\\', '/'))).append("\">← Overview</a>");
+            if (day.activities.size() + (day.wellness != null ? 1 : 0) < 2) {
+                h.append("</nav>");
+                return;
+            }
             for (int i = 0; i < day.activities.size(); i++) {
                 Activity a = day.activities.get(i);
                 h.append("<a href=\"#act").append(i).append("\">").append(sportIcon(a.sport)).append(" ")
@@ -830,7 +834,8 @@ public class DescribeGarminFile {
                 Double time = l.scaled(8);
                 // Derive speed from distance / timer time: the watch's own avg-speed field is occasionally
                 // off (e.g. a factor 10 on a long swim lap), while it otherwise equals this ratio.
-                Double sp = dist != null && time != null && dist > 0 && time > 0 ? dist / time
+                // (Double) keeps the conditional boxed: a primitive branch would unbox a missing (null) speed.
+                Double sp = dist != null && time != null && dist > 0 && time > 0 ? (Double) (dist / time)
                         : l.has(110) ? l.scaled(110) : l.scaled(13);
                 Double start = l.num(2);
                 int lapNo = n++;
@@ -3213,7 +3218,7 @@ public class DescribeGarminFile {
             .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:18px 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
             nav{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;position:sticky;top:0;z-index:1000;padding:8px 0;background:var(--bg)}
             nav a{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 12px;color:var(--fg);text-decoration:none;font-size:14px}
-            nav a:hover{border-color:var(--accent)}
+            nav a:hover{border-color:var(--accent)}nav a.home{font-weight:600;color:var(--accent)}
             .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin:8px 0 6px}
             .tile{border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:help}
             .tile .v{font-size:19px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.25}
