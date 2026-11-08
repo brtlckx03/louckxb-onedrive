@@ -222,6 +222,7 @@ public class DescribeGarminFile {
         try (Stream<Path> s = Files.walk(DATA_DIR)) {
             for (Path p : (Iterable<Path>) s::iterator) {
                 String n = p.getFileName().toString();
+                if (p.getParent() != null && p.getParent().getFileName().toString().equals(SwimCorrection.DIR)) continue;
                 var m = ACTIVITY_FILE.matcher(n);
                 if (m.matches()) {
                     LocalDate d = LocalDate.parse(m.group(1));
@@ -302,6 +303,8 @@ public class DescribeGarminFile {
         Instant start;
         ZoneId zone = ZoneId.systemDefault();
         String sport = "";
+        /** Corrected pool-swim distance (its own file next to the data), or null. */
+        SwimCorrection.Result correction;
 
         static Activity load(ActivityFiles f) {
             Activity a = new Activity();
@@ -351,6 +354,7 @@ public class DescribeGarminFile {
             if (a.sport.isEmpty() && a.fit != null && a.fit.first(18) != null) {
                 a.sport = Objects2.toStr(a.fit.first(18).display(5));
             }
+            a.correction = SwimCorrection.update(a).orElse(null);
             return a;
         }
 
@@ -390,6 +394,7 @@ public class DescribeGarminFile {
                 j.append("{\"name\":\"").append(jsonEscape(a.title())).append("\",\"sport\":\"").append(jsonEscape(a.sport))
                         .append("\",\"start\":\"").append(a.start == null ? "" : HM.format(a.start.atZone(a.zone))).append('"');
                 jsonNum(j, "distance", at(s, "distance"));
+                if (a.correction != null && a.correction.differs()) jsonNum(j, "correctedDistance", a.correction.distance());
                 jsonNum(j, "duration", at(s, "duration"));
                 jsonNum(j, "calories", at(s, "calories"));
                 jsonNum(j, "averageHR", at(s, "averageHR"));
@@ -561,6 +566,7 @@ public class DescribeGarminFile {
             h.append(esc(humanize(a.sport))).append(" · activity id ").append(a.files.id).append("</p>");
 
             if (s != null) activityTiles(a, s, jsonName);
+            correctionNote(a);
             fitSessionTiles(a);
             mapBlock(a, idx);
             activityCharts(a);
@@ -584,6 +590,23 @@ public class DescribeGarminFile {
                 details("GPX file — track content", "GPX", a.files.gpx.getFileName().toString(), () -> gpxDetails(a.gpx));
             }
             h.append("</section>");
+        }
+
+        void correctionNote(Activity a) {
+            SwimCorrection.Result c = a.correction;
+            if (c == null) return;
+            long recounted = c.laps().stream().filter(SwimCorrection.Lap::recounted).count();
+            h.append("<p class=\"note\"><b>Corrected distance: ").append(fmtDist(c.distance())).append("</b> (Garmin: ")
+                    .append(fmtDist(c.garminDistance())).append(") · ");
+            if (c.manualDistance() != null) h.append("set by hand in <code>overrides.distance</code>");
+            else if (recounted == 0) h.append("every lap's strokes per length look normal, so the watch's length count stands");
+            else h.append(recounted).append(" of ").append(c.laps().size()).append(" laps recounted at ")
+                    .append(fmtNum(c.strokesPerLength(), 1)).append(" strokes per length")
+                    .append(c.customReference() ? " (from <code>overrides.strokesPerLength</code>)" : "")
+                    .append(c.customReference() ? "" : " (this swim's normal lengths)")
+                    .append(", because their strokes per length were more than ").append(fmtNum(SwimCorrection.TOLERANCE * 100, 0))
+                    .append("% off and their length times show missed or phantom turns");
+            h.append(". From <code>").append(esc(DATA_DIR.relativize(c.file()).toString())).append("</code>; the Garmin files are unchanged.</p>");
         }
 
         void activityTiles(Activity a, Map<String, Object> s, String file) {
@@ -777,26 +800,64 @@ public class DescribeGarminFile {
             List<FitMessage> laps = a.fit.messages(19);
             h.append("<h3>Laps (").append(laps.size()).append(")</h3>")
                     .append(srcLine("FIT", a.files.fit.getFileName().toString(), "lap messages"));
-            h.append("<div class=\"scroll\"><table><thead><tr><th>#</th><th>Start</th><th>Distance</th><th>Time</th><th>")
+            Map<Integer, SwimCorrection.Lap> fixed = new HashMap<>();
+            if (swim && a.correction != null) a.correction.laps().forEach(cl -> fixed.put(cl.lap(), cl));
+            boolean corr = !fixed.isEmpty();
+            h.append("<div class=\"scroll\"><table><thead><tr><th>#</th><th>Start</th><th>Distance</th>")
+                    .append(corr ? "<th title=\"Recounted from strokes per length where the watch's turn detection looks off\">Corrected</th>" : "")
+                    .append("<th>Time</th><th>")
                     .append(run || swim ? "Pace" : "Speed").append("</th><th>Avg HR</th><th>Max HR</th><th>Cadence</th><th>Ascent</th><th>Calories</th>")
                     .append(swim ? "<th>Lengths</th><th>Stroke</th>" : "").append("<th>Intensity</th><th>Trigger</th></tr></thead><tbody>");
+            List<FitMessage> lens = a.fit.messages(101);
+            double pool = poolLength(a);
+            int cols = (swim ? 14 : 12) + (corr ? 1 : 0);
             int n = 1;
             for (FitMessage l : laps) {
+                // A swim lap points at its pool lengths through first_length_index + num_lengths.
+                Double first = l.num(35), count = l.num(32);
+                List<FitMessage> own = swim && first != null && count != null && count > 0 && first + count <= lens.size()
+                        ? lens.subList(first.intValue(), first.intValue() + count.intValue()) : List.of();
                 Double dist = l.scaled(9);
                 Double time = l.scaled(8);
-                Double sp = l.has(110) ? l.scaled(110) : l.scaled(13);
+                // Derive speed from distance / timer time: the watch's own avg-speed field is occasionally
+                // off (e.g. a factor 10 on a long swim lap), while it otherwise equals this ratio.
+                Double sp = dist != null && time != null && dist > 0 && time > 0 ? dist / time
+                        : l.has(110) ? l.scaled(110) : l.scaled(13);
                 Double start = l.num(2);
-                h.append("<tr><td>").append(n++).append("</td><td>")
-                        .append(start == null ? "" : HMS.format(fitInstant(start).atZone(a.zone))).append("</td><td class=\"num\">")
-                        .append(dist == null ? "" : fmtDist(dist)).append("</td><td class=\"num\">")
+                int lapNo = n++;
+                h.append(own.isEmpty() ? "<tr><td>" : "<tr class=\"has-sub\" onclick=\"toggleSub(this)\" title=\"Show this lap's lengths\"><td>")
+                        .append(lapNo).append("</td><td>")
+                        .append(start == null ? "" : HMS.format(fitInstant(start).atZone(a.zone)))
+                        .append(dist == null ? "</td><td class=\"num\">" : "</td><td class=\"num\" data-value=\"" + dist + "\">" + fmtDist(dist)).append("</td>");
+                if (corr) {
+                    SwimCorrection.Lap cl = fixed.get(lapNo);
+                    if (cl == null) h.append("<td class=\"num\"></td>");
+                    else {
+                        double cd = cl.lengths() * a.correction.pool();
+                        h.append("<td class=\"num").append(cl.recounted() ? " fixed" : "").append("\" data-value=\"").append(cd).append("\" title=\"")
+                                .append(cl.recounted()
+                                        ? fmtNum(cl.strokes(), 0) + " strokes ÷ " + fmtNum(a.correction.strokesPerLength(), 1) + " per length = "
+                                          + cl.lengths() + " lengths (watch: " + cl.garminLengths() + ")"
+                                        : fmtNum(cl.strokes() / cl.garminLengths(), 1) + " strokes per length: within "
+                                          + fmtNum(SwimCorrection.TOLERANCE * 100, 0) + "%, kept as recorded")
+                                .append("\">").append(fmtDist(cd)).append("</td>");
+                    }
+                }
+                h.append("<td class=\"num\">")
                         .append(time == null ? "" : fmtDur(time)).append("</td><td class=\"num\">")
                         .append(sp == null || sp == 0 ? "" : run || swim ? fmtPace(sp, swim) : fmtNum(sp * 3.6, 1) + " km/h")
                         .append("</td><td class=\"num\">").append(l.display(15)).append("</td><td class=\"num\">").append(l.display(16))
                         .append("</td><td class=\"num\">").append(run && l.scaled(17) != null ? fmtNum(l.scaled(17) * 2, 0) + " spm" : l.display(17))
                         .append("</td><td class=\"num\">").append(l.display(21))
                         .append("</td><td class=\"num\">").append(l.display(11)).append("</td>");
-                if (swim) h.append("<td class=\"num\">").append(l.display(40)).append("</td><td>").append(l.display(38)).append("</td>");
+                if (swim) h.append("<td class=\"num\">").append(l.display(40)).append(own.isEmpty() ? "" : " <span class=\"caret\">▸</span>")
+                        .append("</td><td>").append(l.display(38)).append("</td>");
                 h.append("<td>").append(l.display(23)).append("</td><td>").append(l.display(24)).append("</td></tr>");
+                if (!own.isEmpty()) {
+                    h.append("<tr class=\"sub\" hidden><td colspan=\"").append(cols).append("\">");
+                    lengthsTable(a, own, first.intValue() + 1, pool);
+                    h.append("</td></tr>");
+                }
             }
             h.append("</tbody></table></div>");
         }
@@ -804,7 +865,7 @@ public class DescribeGarminFile {
         void swimLengths(Activity a) {
             if (a.fit == null || a.fit.count(101) == 0) return;
             List<FitMessage> lens = a.fit.messages(101);
-            double pool = Optional.ofNullable(a.fit.first(18)).map(s -> s.scaled(44)).orElse(25.0);
+            double pool = poolLength(a);
             h.append("<h3>Pool lengths (").append(lens.size()).append(")</h3>")
                     .append(srcLine("FIT", a.files.fit.getFileName().toString(), "length messages · pool " + fmtNum(pool, 0) + " m"));
             // Compact chart of time per active length.
@@ -816,8 +877,19 @@ public class DescribeGarminFile {
                 if (ts != null && t != null) per.add(fitInstant(ts).toEpochMilli(), t);
             }
             if (!per.isEmpty()) h.append("<div class=\"charts\">").append(lineChart("Seconds per active length", "s", per, "var(--c-speed)", a.zone, false, 1)).append("</div>");
-            h.append("<details><summary>Show all lengths</summary><div class=\"scroll\"><table><thead><tr><th>#</th><th>Start</th><th>Type</th><th>Stroke</th><th>Time</th><th>Strokes</th><th>SWOLF</th><th>Pace /100m</th><th>Stroke rate</th></tr></thead><tbody>");
-            int n = 1;
+            h.append("<details><summary>Show all lengths</summary>");
+            lengthsTable(a, lens, 1, pool);
+            h.append("</details>");
+        }
+
+        private static double poolLength(Activity a) {
+            Double p = Optional.ofNullable(a.fit.first(18)).map(s -> s.scaled(44)).orElse(null);
+            return p == null || p <= 0 ? 25.0 : p;
+        }
+
+        /** One row per pool length; {@code n} is the number of the first one in the whole swim. */
+        private void lengthsTable(Activity a, List<FitMessage> lens, int n, double pool) {
+            h.append("<div class=\"scroll\"><table><thead><tr><th>#</th><th>Start</th><th>Type</th><th>Stroke</th><th>Time</th><th>Strokes</th><th>SWOLF</th><th>Pace /100m</th><th>Stroke rate</th></tr></thead><tbody>");
             for (FitMessage l : lens) {
                 Double t = l.scaled(4);
                 Double strokes = l.scaled(5);
@@ -831,7 +903,7 @@ public class DescribeGarminFile {
                         .append("</td><td class=\"num\">").append(active && t != null ? fmtDur(t * 100 / pool) : "")
                         .append("</td><td class=\"num\">").append(active ? l.display(9) : "").append("</td></tr>");
             }
-            h.append("</tbody></table></div></details>");
+            h.append("</tbody></table></div>");
         }
 
         void devices(Activity a) {
@@ -1744,7 +1816,8 @@ public class DescribeGarminFile {
                 for (Entry e : m.getValue()) row(h, e);
                 h.append("</tbody></table></div></section>");
             }
-            h.append("<footer>Click a column header to sort. Reports live in <code>").append(esc(DATA_DIR.toString()))
+            h.append("<footer>Click a column header to sort. A distance marked ≈ is a corrected pool-swim distance ")
+                    .append("(recounted from the stroke count; hover for Garmin's value, details in the day report). Reports live in <code>").append(esc(DATA_DIR.toString()))
                     .append("</code>.</footer></main><div id=\"tip\"></div><script>").append(JS)
                     .append(OVERVIEW_JS)
                     .append("</script></body></html>");
@@ -1759,10 +1832,11 @@ public class DescribeGarminFile {
             // One line per activity, aligned with the activity names, instead of a day total.
             StringBuilder dists = new StringBuilder("<div class=\"stack dists\">");
             for (Object o : acts) {
-                dist += numOr(at(o, "distance"), 0);
+                dist += numOr(distanceOf(o), 0);
                 time += numOr(at(o, "duration"), 0);
                 kcal += numOr(at(o, "calories"), 0);
-                Double d = num(at(o, "distance")), dur = num(at(o, "duration"));
+                Double d = distanceOf(o), dur = num(at(o, "duration")), garmin = num(at(o, "distance"));
+                boolean corrected = num(at(o, "correctedDistance")) != null;
                 // Garmin's averageSpeed is exactly distance / (timer) duration, so it can be derived here.
                 double kmh = d != null && dur != null && d > 0 && dur > 0 ? d / dur * 3.6 : 0;
                 names.append("<span data-sport=\"").append(esc(str(at(o, "sport")))).append("\" data-dist=\"")
@@ -1770,7 +1844,10 @@ public class DescribeGarminFile {
                         .append("\" title=\"").append(esc(humanize(str(at(o, "sport")))))
                         .append(kmh > 0 ? " · " + fmtNum(kmh, 1) + " km/h" : "").append("\">")
                         .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name")))).append("</span>");
-                dists.append(d != null && d > 0 ? "<span>" + fmtDist(d) + "</span>" : "<span class=\"muted\">–</span>");
+                dists.append(d == null || d <= 0 ? "<span class=\"muted\">–</span>"
+                        : corrected ? "<span class=\"corr\" title=\"Corrected from the stroke count; Garmin: "
+                                      + (garmin == null ? "–" : fmtDist(garmin)) + "\">≈ " + fmtDist(d) + "</span>"
+                        : "<span>" + fmtDist(d) + "</span>");
             }
             names.append("</div>");
             dists.append("</div>");
@@ -1784,6 +1861,12 @@ public class DescribeGarminFile {
                     .append("</td><td class=\"num\">").append(cell(s, "restingHR", 0)).append("</td><td class=\"num\">")
                     .append(cell(s, "hrv", 0)).append("</td><td class=\"num\">").append(cell(s, "bodyBatteryHigh", 0))
                     .append("</td><td class=\"num\">").append(cell(s, "avgStress", 0)).append("</td></tr>");
+        }
+
+        /** The corrected distance where one exists (pool swims), else Garmin's. */
+        private static Double distanceOf(Object activity) {
+            Double c = num(at(activity, "correctedDistance"));
+            return c != null ? c : num(at(activity, "distance"));
         }
 
         private static String cell(Map<String, Object> s, String key, int decimals) {
@@ -1802,7 +1885,7 @@ public class DescribeGarminFile {
                 if (!acts.isEmpty()) activeDays++;
                 for (Object o : acts) {
                     activities++;
-                    dist += numOr(at(o, "distance"), 0);
+                    dist += numOr(distanceOf(o), 0);
                     time += numOr(at(o, "duration"), 0);
                     String sp = str(at(o, "sport"));
                     if (!sp.isEmpty()) sports.merge(sp, 1, Integer::sum);
@@ -3126,6 +3209,9 @@ public class DescribeGarminFile {
             table.dense{font-size:12px}table.dense td,table.dense th{padding:3px 6px;white-space:nowrap}
             table.kv th{width:38%;white-space:normal;color:var(--fg);font-weight:500}table.kv{margin-bottom:6px}
             tr.rest td{color:var(--muted);font-style:italic}
+            tr.has-sub{cursor:pointer}tr.has-sub:hover td{background:var(--bg)}
+            tr.has-sub .caret{display:inline-block;color:var(--muted);transition:transform .15s}tr.has-sub.open .caret{transform:rotate(90deg)}
+            tr.sub>td{padding:4px 0 12px 24px;background:var(--bg)}
             td.neg{color:#e5484d}td.pos{color:#16a34a}
             details{border:1px solid var(--line);border-radius:10px;margin:8px 0;padding:0 12px}
             details>summary{cursor:pointer;padding:9px 0;font-weight:550}
@@ -3154,6 +3240,7 @@ public class DescribeGarminFile {
             .chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
             .q{font-size:12.5px;border:1px solid var(--line);border-radius:999px;padding:2px 10px}
             .q-excellent b{color:#16a34a}.q-good b{color:#22c55e}.q-fair b{color:#d97706}.q-poor b{color:#e5484d}
+            td.fixed{color:var(--accent);font-weight:600}.dists .corr{color:var(--accent)}
             .note{background:color-mix(in srgb,var(--accent) 8%,transparent);border-radius:8px;padding:8px 12px;font-size:14px}
             .warn{color:#b45309}
             footer{color:var(--muted);font-size:12.5px;margin-top:30px}
@@ -3228,6 +3315,8 @@ public class DescribeGarminFile {
               });
               // Click a column header to sort; click again to reverse. Durations (m:ss, h:mm:ss) sort as seconds,
               // numbers ignore units and thousands spaces, empty cells always go last.
+              window.toggleSub=function(tr){var s=tr.nextElementSibling;if(!s||!s.classList.contains('sub'))return;
+                s.hidden=!s.hidden;tr.classList.toggle('open',!s.hidden);};
               function key(td){
                 if(td&&td.hasAttribute('data-value')) return parseFloat(td.getAttribute('data-value'));
                 var t=(td?td.textContent:'').trim();
@@ -3247,7 +3336,9 @@ public class DescribeGarminFile {
                     var asc=th.getAttribute('data-sort')!=='asc';
                     Array.prototype.forEach.call(head.rows[0].cells,function(o){o.removeAttribute('data-sort');});
                     th.setAttribute('data-sort',asc?'asc':'desc');
-                    var rows=Array.prototype.slice.call(body.rows);
+                    // Expandable detail rows (tr.sub) travel with the row above them.
+                    var rows=Array.prototype.filter.call(body.rows,function(r){
+                      if(r.classList.contains('sub')){var p=r.previousElementSibling;if(p)p._sub=r;return false;}return true;});
                     rows.sort(function(a,b){
                       var x=key(a.cells[col]),y=key(b.cells[col]);
                       if(x===null) return y===null?0:1;
@@ -3255,7 +3346,7 @@ public class DescribeGarminFile {
                       var r=(typeof x===typeof y)?(x<y?-1:x>y?1:0):(typeof x==='number'?-1:1);
                       return asc?r:-r;
                     });
-                    rows.forEach(function(r){body.appendChild(r);});
+                    rows.forEach(function(r){body.appendChild(r);if(r._sub)body.appendChild(r._sub);});
                   });
                 });
               });
