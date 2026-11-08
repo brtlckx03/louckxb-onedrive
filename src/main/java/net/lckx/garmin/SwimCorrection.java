@@ -6,11 +6,16 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import net.lckx.garmin.DescribeGarminFile.Activity;
 import net.lckx.garmin.DescribeGarminFile.FitMessage;
@@ -20,8 +25,11 @@ import net.lckx.garmin.DescribeGarminFile.FitMessage;
  *
  * <p>The watch counts lengths by detecting turns, and gets that wrong: it sees phantom turns (one real
  * length recorded as two short ones) or misses turns (two lengths recorded as one long one). The stroke
- * count is much more reliable, so each lap is checked against the swim's own reference: the median strokes
- * of its normal-looking lengths (those whose time is close to the swim's median length time). A lap is
+ * count is much more reliable, so each lap is checked against a reference length: strokes and seconds per
+ * length. A consistent swim (length times with a small spread, see {@link #MAX_SPREAD}) is its own reference:
+ * the medians of its normal-looking lengths. A messy swim cannot be: when most lengths are split, its "normal"
+ * length is a split one. It uses the {@link #NEARBY} closest consistent swims (within {@link #MAX_DAYS} days)
+ * instead, read from their correction files. A lap is
  * recounted as {@code strokes / reference} only when both
  * <ul>
  *   <li>its strokes per recorded length are more than {@link #TOLERANCE} off the reference, and</li>
@@ -42,12 +50,26 @@ final class SwimCorrection {
     static final double MIN_OUTLIER_SHARE = 0.10;
     /** Stroke counts above this per length are corrupt data, not swimming. */
     static final double MAX_STROKES = 60;
+    /** A swim whose length times have an interquartile range up to this share of the median is consistent. */
+    static final double MAX_SPREAD = 0.25;
+    static final int MIN_LENGTHS_TRUSTED = 15, NEARBY = 5, MAX_DAYS = 365;
     static final String DIR = "corrected";
 
     record Lap(int lap, int garminLengths, double strokes, int lengths, boolean recounted, double seconds) {}
 
-    record Result(Path file, double pool, double strokesPerLength, double secondsPerLength, boolean customReference, Double manualDistance,
-                  List<Lap> laps) {
+    /** This swim's own length statistics, also used as reference by nearby messy swims. */
+    record Self(LocalDate date, double strokesPerLength, double secondsPerLength, double spread, int lengths) {
+        boolean trusted() {
+            return lengths >= MIN_LENGTHS_TRUSTED && spread <= MAX_SPREAD;
+        }
+    }
+
+    /**
+     * @param cumulative corrected distance after each pool length (index as in the FIT length messages)
+     */
+    record Result(Path file, double pool, double strokesPerLength, double secondsPerLength, String referenceSource,
+                  List<LocalDate> referenceSwims, Self self, boolean customReference, Double manualDistance,
+                  List<Lap> laps, double[] cumulative) {
         int garminLengths() {
             return laps.stream().mapToInt(Lap::garminLengths).sum();
         }
@@ -102,8 +124,38 @@ final class SwimCorrection {
         double medT = median(act.stream().map(x -> x[0]).toList());
         List<double[]> clean = act.stream().filter(x -> x[0] >= 0.75 * medT && x[0] <= 1.33 * medT).toList();
         if (clean.isEmpty()) clean = act;
-        double refT = median(clean.stream().map(x -> x[0]).toList());
-        double ref = custom != null ? custom : median(clean.stream().map(x -> x[1]).toList());
+        List<Double> times = act.stream().map(x -> x[0]).sorted().toList();
+        double spread = (times.get(times.size() * 3 / 4) - times.get(times.size() / 4)) / medT;
+        LocalDate date = LocalDate.parse(a.files.base().substring(0, 10));
+        Self self = new Self(date, median(clean.stream().map(x -> x[1]).toList()),
+                median(clean.stream().map(x -> x[0]).toList()), spread, act.size());
+        remember(a.files.fit(), file, self);
+
+        double ref = self.strokesPerLength(), refT = self.secondsPerLength();
+        String source = "this swim";
+        List<LocalDate> from = List.of();
+        if (!self.trusted()) {
+            List<Self> near = nearbyTrusted(a.files.fit(), file, date);
+            if (!near.isEmpty()) {
+                // Nearby swims tell how long a real length takes; this swim's lengths of about that time then give
+                // its own strokes per length (stroke counts differ more between days than length times do).
+                double anchor = median(near.stream().map(Self::secondsPerLength).toList());
+                List<double[]> real = act.stream().filter(x -> x[0] >= 0.75 * anchor && x[0] <= 1.33 * anchor).toList();
+                if (real.size() >= Math.max(8, 0.2 * act.size())) {
+                    ref = median(real.stream().map(x -> x[1]).toList());
+                    refT = median(real.stream().map(x -> x[0]).toList());
+                    source = "this swim's lengths that take as long as in nearby consistent swims";
+                } else {
+                    // Too few lengths look real: another day's stroke count would be a guess, so nothing is recounted.
+                    source = "none: too few lengths of a plausible time, kept as recorded";
+                }
+                from = near.stream().map(Self::date).sorted().toList();
+            }
+        }
+        if (custom != null) {
+            ref = custom;
+            source = "override";
+        }
 
         List<Lap> laps = new ArrayList<>();
         int n = 0;
@@ -128,19 +180,91 @@ final class SwimCorrection {
             if (active == 0) continue;
             int counted = active - withoutStrokes;
             // Lengths without a usable stroke count (e.g. kicking) cannot be checked and are kept as recorded.
-            boolean recount = counted > 0 && Math.abs(strokes / counted / ref - 1) > TOLERANCE
+            boolean recount = !source.startsWith("none") && counted > 0 && Math.abs(strokes / counted / ref - 1) > TOLERANCE
                     && outliers >= Math.max(1, MIN_OUTLIER_SHARE * active);
             int lengths = recount ? Math.max(1, (int) Math.round(strokes / ref)) + withoutStrokes : active;
             laps.add(new Lap(n, active, strokes, lengths, recount, seconds));
         }
         if (laps.isEmpty()) return Optional.empty();
-        Result r = new Result(file, pool, ref, refT, custom != null, manual, laps);
+        double[] cum = cumulative(a, lens, laps, ref, pool);
+        Result r = new Result(file, pool, ref, refT, source, from, self, custom != null, manual, laps, cum);
         try {
             write(a, r);
         } catch (IOException e) {
             System.err.println("Could not write " + file + ": " + e.getMessage());
         }
         return Optional.of(r);
+    }
+
+    /** Corrected distance after each length: recounted laps spread their corrected total over their strokes. */
+    private static double[] cumulative(Activity a, List<FitMessage> lens, List<Lap> laps, double ref, double pool) {
+        double[] inc = new double[lens.size()];
+        for (int i = 0; i < lens.size(); i++) inc[i] = active(lens.get(i)) ? pool : 0;
+        List<FitMessage> lapMsgs = a.fit.messages(19);
+        for (Lap l : laps) {
+            if (!l.recounted()) continue;
+            FitMessage m = lapMsgs.get(l.lap() - 1);
+            int first = m.num(35).intValue(), count = m.num(32).intValue();
+            double sum = 0;
+            for (int i = first; i < first + count; i++) {
+                if (!active(lens.get(i))) continue;
+                Double s = strokes(lens.get(i));
+                inc[i] = s == null ? pool : s / ref * pool;
+                sum += inc[i];
+            }
+            double scale = sum > 0 ? l.lengths() * pool / sum : 1;
+            for (int i = first; i < first + count; i++) inc[i] *= scale;
+        }
+        double[] cum = new double[lens.size()];
+        double run = 0;
+        for (int i = 0; i < lens.size(); i++) cum[i] = run += inc[i];
+        return cum;
+    }
+
+    // ---- reference swims: every correction file records its own statistics ("self")
+
+    private static Map<Path, Self> known;
+
+    private static Path root(Path fit) {
+        return fit.getParent().getParent().getParent(); // <root>/YYYY/MM/file.fit
+    }
+
+    private static synchronized void remember(Path fit, Path file, Self self) {
+        if (known == null) load(root(fit));
+        known.put(file.toAbsolutePath().normalize(), self);
+    }
+
+    private static synchronized List<Self> nearbyTrusted(Path fit, Path file, LocalDate date) {
+        if (known == null) load(root(fit));
+        Path me = file.toAbsolutePath().normalize();
+        return known.entrySet().stream()
+                .filter(e -> !e.getKey().equals(me) && e.getValue().trusted())
+                .map(Map.Entry::getValue)
+                .filter(s -> Math.abs(ChronoUnit.DAYS.between(s.date(), date)) <= MAX_DAYS)
+                .sorted(Comparator.comparingLong(s -> Math.abs(ChronoUnit.DAYS.between(s.date(), date))))
+                .limit(NEARBY).toList();
+    }
+
+    private static void load(Path root) {
+        known = new HashMap<>();
+        if (!Files.isDirectory(root)) return;
+        try (Stream<Path> st = Files.walk(root, 4)) {
+            for (Path p : (Iterable<Path>) st::iterator) {
+                if (p.getParent() == null || !p.getParent().getFileName().toString().equals(DIR) || !p.toString().endsWith(".json")) continue;
+                try {
+                    if (DescribeGarminFile.Json.parse(Files.readString(p)) instanceof Map<?, ?> m && m.get("self") instanceof Map<?, ?> s
+                            && s.get("strokesPerLength") instanceof Number spl && s.get("secondsPerLength") instanceof Number sec
+                            && s.get("spread") instanceof Number sp && s.get("lengths") instanceof Number n) {
+                        known.put(p.toAbsolutePath().normalize(), new Self(LocalDate.parse(p.getFileName().toString().substring(0, 10)),
+                                spl.doubleValue(), sec.doubleValue(), sp.doubleValue(), n.intValue()));
+                    }
+                } catch (Exception ignored) {
+                    // an unreadable file just isn't used as a reference
+                }
+            }
+        } catch (IOException e) {
+            System.err.println("Could not scan " + root + " for swim references: " + e.getMessage());
+        }
     }
 
     private static boolean active(FitMessage len) {
@@ -184,6 +308,13 @@ final class SwimCorrection {
         j.append("  \"note\": \"Derived by DescribeGarminFile; the Garmin files are not changed. Edit only 'overrides'.\",\n");
         j.append("  \"method\": \"").append(r.method()).append("\",\n");
         j.append("  \"poolLength\": ").append(fmt(r.pool())).append(",\n");
+        j.append("  \"self\": {\"strokesPerLength\": ").append(fmt(r.self().strokesPerLength()))
+                .append(", \"secondsPerLength\": ").append(fmt(r.self().secondsPerLength()))
+                .append(", \"spread\": ").append(fmt(r.self().spread())).append(", \"lengths\": ").append(r.self().lengths())
+                .append(", \"consistent\": ").append(r.self().trusted()).append("},\n");
+        j.append("  \"reference\": {\"source\": \"").append(r.referenceSource()).append("\", \"swims\": [");
+        for (int i = 0; i < r.referenceSwims().size(); i++) j.append(i > 0 ? ", " : "").append('"').append(r.referenceSwims().get(i)).append('"');
+        j.append("]},\n");
         j.append("  \"strokesPerLength\": ").append(fmt(r.strokesPerLength())).append(",\n");
         j.append("  \"secondsPerLength\": ").append(fmt(r.secondsPerLength())).append(",\n");
         j.append("  \"rule\": \"recount a lap as strokes / strokesPerLength when its strokes per length are more than ")

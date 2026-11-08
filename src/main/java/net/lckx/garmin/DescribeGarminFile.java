@@ -599,11 +599,20 @@ public class DescribeGarminFile {
             h.append("<p class=\"note\"><b>Corrected distance: ").append(fmtDist(c.distance())).append("</b> (Garmin: ")
                     .append(fmtDist(c.garminDistance())).append(") · ");
             if (c.manualDistance() != null) h.append("set by hand in <code>overrides.distance</code>");
+            else if (c.referenceSource().startsWith("none"))
+                h.append("the length times are too irregular, and too few look like real lengths, to correct reliably, so Garmin's count is kept")
+                        .append(" — set <code>overrides.distance</code> if you know the real distance");
             else if (recounted == 0) h.append("every lap's strokes per length look normal, so the watch's length count stands");
             else h.append(recounted).append(" of ").append(c.laps().size()).append(" laps recounted at ")
                     .append(fmtNum(c.strokesPerLength(), 1)).append(" strokes per length")
                     .append(c.customReference() ? " (from <code>overrides.strokesPerLength</code>)" : "")
-                    .append(c.customReference() ? "" : " (this swim's normal lengths)")
+                    .append(c.customReference() ? ""
+                            : c.referenceSwims().isEmpty() ? " (this swim's normal lengths)"
+                            : c.referenceSource().startsWith("this swim")
+                            ? " (this swim's length times vary too much to be its own reference; its lengths taking about as long as in the consistent swims of "
+                              + String.join(", ", c.referenceSwims().stream().map(LocalDate::toString).toList()) + " give the strokes per length)"
+                            : " (this swim's length times vary too much to be its own reference, so taken from the consistent swims of "
+                              + String.join(", ", c.referenceSwims().stream().map(LocalDate::toString).toList()) + ")")
                     .append(", because their strokes per length were more than ").append(fmtNum(SwimCorrection.TOLERANCE * 100, 0))
                     .append("% off and their length times show missed or phantom turns");
             h.append(". From <code>").append(esc(DATA_DIR.relativize(c.file()).toString())).append("</code>; the Garmin files are unchanged.</p>");
@@ -889,14 +898,36 @@ public class DescribeGarminFile {
 
         /** One row per pool length; {@code n} is the number of the first one in the whole swim. */
         private void lengthsTable(Activity a, List<FitMessage> lens, int n, double pool) {
-            h.append("<div class=\"scroll\"><table><thead><tr><th>#</th><th>Start</th><th>Type</th><th>Stroke</th><th>Time</th><th>Strokes</th><th>SWOLF</th><th>Pace /100m</th><th>Stroke rate</th></tr></thead><tbody>");
+            // Running totals over the whole swim, so a lap's sub-table continues where the previous lap ended.
+            List<FitMessage> all = a.fit.messages(101);
+            FitMessage session = a.fit.first(18);
+            Double t0 = session != null && session.num(2) != null ? session.num(2) : all.isEmpty() ? null : all.getFirst().num(2);
+            double[] garminCum = new double[all.size()];
+            for (int i = 0, k = 0; i < all.size(); i++) {
+                if (Double.valueOf(1).equals(all.get(i).num(12))) k++;
+                garminCum[i] = k * pool;
+            }
+            double[] corrCum = a.correction != null && a.correction.laps().stream().anyMatch(SwimCorrection.Lap::recounted)
+                    && a.correction.cumulative().length == all.size() ? a.correction.cumulative() : null;
+            h.append("<div class=\"scroll\"><table><thead><tr><th>#</th><th>Start</th>")
+                    .append("<th title=\"Time since the start of the swim, at the end of this length\">Timer</th>")
+                    .append("<th title=\"Distance after this length, as counted by the watch\">Distance</th>")
+                    .append(corrCum != null ? "<th title=\"Distance after this length, recounted from the strokes\">Corrected</th>" : "")
+                    .append("<th>Type</th><th>Stroke</th><th>Time</th><th>Strokes</th><th>SWOLF</th><th>Pace /100m</th><th>Stroke rate</th></tr></thead><tbody>");
             for (FitMessage l : lens) {
+                int idx = n - 1;
                 Double t = l.scaled(4);
                 Double strokes = l.scaled(5);
                 Double start = l.num(2);
+                Double elapsed = l.scaled(3);
                 boolean active = Double.valueOf(1).equals(l.num(12));
+                Double timer = t0 != null && start != null ? start - t0 + (elapsed != null ? elapsed : t != null ? t : 0) : null;
                 h.append("<tr").append(active ? "" : " class=\"rest\"").append("><td>").append(n++).append("</td><td>")
-                        .append(start == null ? "" : HMS.format(fitInstant(start).atZone(a.zone))).append("</td><td>")
+                        .append(start == null ? "" : HMS.format(fitInstant(start).atZone(a.zone))).append("</td><td class=\"num\">")
+                        .append(timer == null ? "" : fmtDur(timer)).append("</td><td class=\"num\">")
+                        .append(idx < garminCum.length ? fmtNum(garminCum[idx], 0) + " m" : "").append("</td>");
+                if (corrCum != null) h.append("<td class=\"num corr\">").append(idx < corrCum.length ? "≈ " + fmtNum(corrCum[idx], 0) + " m" : "").append("</td>");
+                h.append("<td>")
                         .append(l.display(12)).append("</td><td>").append(active ? l.display(7) : "").append("</td><td class=\"num\">")
                         .append(t == null ? "" : fmtDur(t)).append("</td><td class=\"num\">").append(active ? l.display(5) : "")
                         .append("</td><td class=\"num\">").append(active && t != null && strokes != null ? fmtNum(t + strokes, 0) : "")
@@ -1831,7 +1862,8 @@ public class DescribeGarminFile {
             StringBuilder names = new StringBuilder("<div class=\"acts stack\">");
             // One line per activity, aligned with the activity names, instead of a day total.
             StringBuilder dists = new StringBuilder("<div class=\"stack dists\">");
-            for (Object o : acts) {
+            for (int ai = 0; ai < acts.size(); ai++) {
+                Object o = acts.get(ai);
                 dist += numOr(distanceOf(o), 0);
                 time += numOr(at(o, "duration"), 0);
                 kcal += numOr(at(o, "calories"), 0);
@@ -1839,11 +1871,13 @@ public class DescribeGarminFile {
                 boolean corrected = num(at(o, "correctedDistance")) != null;
                 // Garmin's averageSpeed is exactly distance / (timer) duration, so it can be derived here.
                 double kmh = d != null && dur != null && d > 0 && dur > 0 ? d / dur * 3.6 : 0;
-                names.append("<span data-sport=\"").append(esc(str(at(o, "sport")))).append("\" data-dist=\"")
+                // Links to the activity's section in the day report (sections are #act0, #act1, … in the same order).
+                names.append("<a class=\"act\" href=\"").append(esc(e.href)).append("#act").append(ai)
+                        .append("\" data-sport=\"").append(esc(str(at(o, "sport")))).append("\" data-dist=\"")
                         .append(d == null ? 0 : Math.round(d)).append("\" data-kmh=\"").append(Math.round(kmh * 100) / 100.0)
                         .append("\" title=\"").append(esc(humanize(str(at(o, "sport")))))
                         .append(kmh > 0 ? " · " + fmtNum(kmh, 1) + " km/h" : "").append("\">")
-                        .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name")))).append("</span>");
+                        .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name")))).append("</a>");
                 dists.append(d == null || d <= 0 ? "<span class=\"muted\">–</span>"
                         : corrected ? "<span class=\"corr\" title=\"Corrected from the stroke count; Garmin: "
                                       + (garmin == null ? "–" : fmtDist(garmin)) + "\">≈ " + fmtDist(d) + "</span>"
@@ -3189,7 +3223,7 @@ public class DescribeGarminFile {
             a.tile.link:hover{border-color:var(--accent)}
             a.tile.link.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
             .acts .dim,.dists .dim{opacity:.35}
-            div.stack{display:flex;flex-direction:column;gap:2px}.stack span{white-space:nowrap;line-height:22px}
+            div.stack{display:flex;flex-direction:column;gap:2px}.stack>*{white-space:nowrap;line-height:22px}
             .filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:4px 0 8px}
             .filters .filter{margin:0}
             .filters select,.filters label input{padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:inherit}
@@ -3240,7 +3274,7 @@ public class DescribeGarminFile {
             .chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
             .q{font-size:12.5px;border:1px solid var(--line);border-radius:999px;padding:2px 10px}
             .q-excellent b{color:#16a34a}.q-good b{color:#22c55e}.q-fair b{color:#d97706}.q-poor b{color:#e5484d}
-            td.fixed{color:var(--accent);font-weight:600}.dists .corr{color:var(--accent)}
+            td.fixed{color:var(--accent);font-weight:600}td.corr{color:var(--accent)}.dists .corr{color:var(--accent)}
             .note{background:color-mix(in srgb,var(--accent) 8%,transparent);border-radius:8px;padding:8px 12px;font-size:14px}
             .warn{color:#b45309}
             footer{color:var(--muted);font-size:12.5px;margin-top:30px}
@@ -3248,7 +3282,8 @@ public class DescribeGarminFile {
             a{color:var(--accent)}
             .filter{width:100%;max-width:360px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:inherit;margin:4px 0 8px}
             .month td:first-child{white-space:nowrap}
-            .acts{display:flex;flex-wrap:wrap;gap:4px 10px}.acts span{white-space:nowrap}
+            .acts{display:flex;flex-wrap:wrap;gap:4px 10px}.acts>*{white-space:nowrap}
+            a.act{color:inherit;text-decoration:none}a.act:hover{color:var(--accent);text-decoration:underline}
             @media (max-width:560px){.zone{grid-template-columns:90px 1fr 110px}h1{font-size:24px}.card{padding:16px}}
             """;
 
