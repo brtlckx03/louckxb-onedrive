@@ -1718,8 +1718,17 @@ public class DescribeGarminFile {
             h.append("<div class=\"tiles\">");
             all.tiles(h);
             h.append("</div>");
-            h.append("<input class=\"filter\" type=\"search\" placeholder=\"Filter, e.g. Zwembad, cycling, 2026-09…\" ")
-                    .append("oninput=\"filterRows(this.value)\">");
+            h.append("<div class=\"filters\"><input class=\"filter\" id=\"q\" type=\"search\" ")
+                    .append("placeholder=\"Text, e.g. Zwembad, 2026-09…\" oninput=\"filterRows()\">")
+                    .append("<select id=\"sport\" onchange=\"filterRows()\"><option value=\"\">All activities</option>");
+            for (var en : all.sports.entrySet())
+                h.append("<option value=\"").append(esc(en.getKey())).append("\">").append(esc(humanize(en.getKey())))
+                        .append(" (").append(en.getValue()).append(")</option>");
+            h.append("</select><label>Distance <input id=\"dmin\" type=\"text\" inputmode=\"decimal\" placeholder=\"min\" oninput=\"filterRows()\">")
+                    .append(" – <input id=\"dmax\" type=\"text\" inputmode=\"decimal\" placeholder=\"max\" oninput=\"filterRows()\"> km</label>")
+                    .append("<label>Speed <input id=\"smin\" type=\"text\" inputmode=\"decimal\" placeholder=\"min\" oninput=\"filterRows()\">")
+                    .append(" – <input id=\"smax\" type=\"text\" inputmode=\"decimal\" placeholder=\"max\" oninput=\"filterRows()\"> km/h</label>")
+                    .append("<span id=\"filterStatus\"></span></div>");
 
             Map<String, List<Entry>> byMonth = new LinkedHashMap<>();
             for (Entry e : entries) byMonth.computeIfAbsent(e.date.toString().substring(0, 7), k -> new ArrayList<>()).add(e);
@@ -1737,9 +1746,7 @@ public class DescribeGarminFile {
             }
             h.append("<footer>Click a column header to sort. Reports live in <code>").append(esc(DATA_DIR.toString()))
                     .append("</code>.</footer></main><div id=\"tip\"></div><script>").append(JS)
-                    .append("function filterRows(q){q=q.toLowerCase();document.querySelectorAll('section.month').forEach(function(s){")
-                    .append("var any=false;s.querySelectorAll('tbody tr').forEach(function(r){var ok=r.textContent.toLowerCase().indexOf(q)>=0;")
-                    .append("r.style.display=ok?'':'none';any=any||ok;});s.style.display=any?'':'none';});}")
+                    .append(OVERVIEW_JS)
                     .append("</script></body></html>");
             return h.toString();
         }
@@ -1748,21 +1755,29 @@ public class DescribeGarminFile {
             Map<String, Object> s = e.summary;
             List<Object> acts = Optional.ofNullable(asList(s.get("activities"))).orElse(List.of());
             double dist = 0, time = 0, kcal = 0;
-            StringBuilder names = new StringBuilder("<div class=\"acts\">");
+            StringBuilder names = new StringBuilder("<div class=\"acts stack\">");
+            // One line per activity, aligned with the activity names, instead of a day total.
+            StringBuilder dists = new StringBuilder("<div class=\"stack dists\">");
             for (Object o : acts) {
                 dist += numOr(at(o, "distance"), 0);
                 time += numOr(at(o, "duration"), 0);
                 kcal += numOr(at(o, "calories"), 0);
-                Double d = num(at(o, "distance"));
-                names.append("<span title=\"").append(esc(humanize(str(at(o, "sport"))))).append("\">")
-                        .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name"))))
-                        .append(d != null && d > 0 ? " <small class=\"muted\">" + fmtDist(d) + "</small>" : "").append("</span>");
+                Double d = num(at(o, "distance")), dur = num(at(o, "duration"));
+                // Garmin's averageSpeed is exactly distance / (timer) duration, so it can be derived here.
+                double kmh = d != null && dur != null && d > 0 && dur > 0 ? d / dur * 3.6 : 0;
+                names.append("<span data-sport=\"").append(esc(str(at(o, "sport")))).append("\" data-dist=\"")
+                        .append(d == null ? 0 : Math.round(d)).append("\" data-kmh=\"").append(Math.round(kmh * 100) / 100.0)
+                        .append("\" title=\"").append(esc(humanize(str(at(o, "sport")))))
+                        .append(kmh > 0 ? " · " + fmtNum(kmh, 1) + " km/h" : "").append("\">")
+                        .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name")))).append("</span>");
+                dists.append(d != null && d > 0 ? "<span>" + fmtDist(d) + "</span>" : "<span class=\"muted\">–</span>");
             }
             names.append("</div>");
+            dists.append("</div>");
             h.append("<tr><td><a href=\"").append(esc(e.href)).append("\">").append(e.date).append("</a></td><td>")
                     .append(e.date.getDayOfWeek().getDisplayName(TextStyle.SHORT, Locale.ENGLISH)).append("</td><td>")
-                    .append(acts.isEmpty() ? "<span class=\"muted\">rest day</span>" : names).append("</td><td class=\"num\">")
-                    .append(dist > 0 ? fmtDist(dist) : "").append("</td><td class=\"num\">").append(time > 0 ? fmtDur(time) : "")
+                    .append(acts.isEmpty() ? "<span class=\"muted\">rest day</span>" : names).append("</td><td class=\"num\"")
+                    .append(dist > 0 ? " data-value=\"" + Math.round(dist) + "\">" + dists : ">").append("</td><td class=\"num\">").append(time > 0 ? fmtDur(time) : "")
                     .append("</td><td class=\"num\">").append(kcal > 0 ? fmtNum(kcal, 0) : "").append("</td><td class=\"num\">")
                     .append(cell(s, "steps", 0)).append("</td><td class=\"num\">").append(cell(s, "sleepScore", 0))
                     .append("</td><td class=\"num\">").append(num(s.get("sleepSeconds")) == null ? "" : fmtDur(num(s.get("sleepSeconds"))))
@@ -1812,7 +1827,13 @@ public class DescribeGarminFile {
                 tile(h, fmtDist(dist), "Total distance");
                 tile(h, fmtDur(time), "Total activity time");
                 if (steps > 0) tile(h, fmtNum(steps, 0), "Steps");
-                for (var en : sports.entrySet()) tile(h, sportIcon(en.getKey()) + " " + en.getValue(), humanize(en.getKey()));
+                for (var en : sports.entrySet()) {
+                    h.append("<a class=\"tile link\" href=\"#sport=").append(esc(en.getKey())).append("\" data-sport=\"")
+                            .append(esc(en.getKey())).append("\" title=\"Show only ").append(esc(humanize(en.getKey())))
+                            .append(" activities\" onclick=\"return toggleSport(this.dataset.sport)\"><div class=\"v\">")
+                            .append(esc(sportIcon(en.getKey()) + " " + en.getValue())).append("</div><div class=\"l\">")
+                            .append(esc(humanize(en.getKey()))).append("</div></a>");
+                }
             }
 
             private static void tile(StringBuilder h, String v, String l) {
@@ -3081,6 +3102,17 @@ public class DescribeGarminFile {
             .tile .v{font-size:19px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.25}
             .tile .v small,.tile .l small{font-weight:400;color:var(--muted);font-size:12px}
             .tile .l{font-size:12.5px;color:var(--muted);margin-top:2px}
+            a.tile.link{display:block;color:inherit;text-decoration:none;cursor:pointer}
+            a.tile.link:hover{border-color:var(--accent)}
+            a.tile.link.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+            .acts .dim,.dists .dim{opacity:.35}
+            div.stack{display:flex;flex-direction:column;gap:2px}.stack span{white-space:nowrap;line-height:22px}
+            .filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:4px 0 8px}
+            .filters .filter{margin:0}
+            .filters select,.filters label input{padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:inherit}
+            .filters label{color:var(--muted);font-size:14px}
+            .filters label input{width:72px}
+            #filterStatus{color:var(--muted);font-size:14px}
             .src{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.03em;padding:0 6px;border-radius:5px;color:#fff;vertical-align:1px;line-height:17px}
             .src-fit{background:var(--fit)}.src-tcx{background:var(--tcx)}.src-gpx{background:var(--gpx)}.src-json{background:var(--json)}.src-wellness{background:var(--wellness)}
             .from{font-size:13px;color:var(--muted);margin:14px 0 6px}
@@ -3133,6 +3165,49 @@ public class DescribeGarminFile {
             @media (max-width:560px){.zone{grid-template-columns:90px 1fr 110px}h1{font-size:24px}.card{padding:16px}}
             """;
 
+    /** Overview filters: free text, activity type and distance range, combined per activity; state is kept in the URL hash. */
+    private static final String OVERVIEW_JS = """
+            var F={q:document.getElementById('q'),sport:document.getElementById('sport'),
+              min:document.getElementById('dmin'),max:document.getElementById('dmax'),
+              smin:document.getElementById('smin'),smax:document.getElementById('smax')};
+            function val(el){var v=parseFloat(el.value.replace(',','.'));return isNaN(v)?null:v;}
+            function km(el){var v=val(el);return v===null?null:v*1000;}
+            function toggleSport(sp){F.sport.value=F.sport.value===sp?'':sp;filterRows();
+              var f=document.querySelector('section.month:not([style*=none])');
+              if(F.sport.value&&f)f.scrollIntoView({behavior:'smooth'});return false;}
+            function clearFilters(){['q','sport','min','max','smin','smax'].forEach(function(k){F[k].value='';});filterRows();return false;}
+            function filterRows(){
+              var q=F.q.value.toLowerCase().trim(),sp=F.sport.value,mn=km(F.min),mx=km(F.max),
+                  smn=val(F.smin),smx=val(F.smax),
+                  act=!!sp||mn!==null||mx!==null||smn!==null||smx!==null,n=0,tot=0,days=0;
+              document.querySelectorAll('.tile.link').forEach(function(t){t.classList.toggle('on',t.dataset.sport===sp);});
+              document.querySelectorAll('section.month').forEach(function(s){var any=false;
+                s.querySelectorAll('tbody tr').forEach(function(r){
+                  var ok=!q||r.textContent.toLowerCase().indexOf(q)>=0,hit=0,d=0;
+                  var dl=r.querySelectorAll('.dists > span');
+                  r.querySelectorAll('[data-sport]').forEach(function(a,i){
+                    var dist=parseFloat(a.dataset.dist||'0'),v=parseFloat(a.dataset.kmh||'0'),
+                        m=(!sp||a.dataset.sport===sp)&&(mn===null||dist>=mn)&&(mx===null||dist<=mx)
+                          &&(smn===null||(v>0&&v>=smn))&&(smx===null||(v>0&&v<=smx));
+                    a.classList.toggle('dim',act&&!m);if(dl[i])dl[i].classList.toggle('dim',act&&!m);
+                    if(act&&m){hit++;d+=dist;}});
+                  if(act&&!hit)ok=false;
+                  if(ok){days++;n+=hit;tot+=d;}
+                  r.style.display=ok?'':'none';any=any||ok;});
+                s.style.display=any?'':'none';});
+              var st=document.getElementById('filterStatus');st.innerHTML='';
+              if(act||q){
+                st.textContent=(act?n+(n===1?' activity on ':' activities on '):'')+days+(days===1?' day':' days')+(act&&tot>0?' · '+(tot/1000).toFixed(2)+' km':'')+' ';
+                var x=document.createElement('a');x.href='#';x.textContent='✕ clear';x.onclick=clearFilters;st.appendChild(x);}
+              var p=new URLSearchParams();
+              if(sp)p.set('sport',sp);['min','max','smin','smax'].forEach(function(k){if(F[k].value)p.set(k,F[k].value);});
+              if(q)p.set('q',F.q.value);
+              var h=p.toString();history.replaceState(null,'',h?'#'+h:location.pathname+location.search);}
+            (function(){if(location.hash.length<2)return;var p=new URLSearchParams(location.hash.slice(1));
+              ['q','sport','min','max','smin','smax'].forEach(function(k){F[k].value=p.get(k)||'';});
+              filterRows();})();
+            """;
+
     private static final String JS = """
             (function(){
               var tip=document.getElementById('tip');
@@ -3154,6 +3229,7 @@ public class DescribeGarminFile {
               // Click a column header to sort; click again to reverse. Durations (m:ss, h:mm:ss) sort as seconds,
               // numbers ignore units and thousands spaces, empty cells always go last.
               function key(td){
+                if(td&&td.hasAttribute('data-value')) return parseFloat(td.getAttribute('data-value'));
                 var t=(td?td.textContent:'').trim();
                 if(!t||t==='–'||t==='—') return null;
                 var d=t.match(/^-?\\d+(:\\d\\d)+/);
