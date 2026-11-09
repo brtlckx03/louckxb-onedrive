@@ -1823,12 +1823,12 @@ public class DescribeGarminFile {
 
             Totals all = new Totals();
             entries.forEach(all::add);
-            h.append("<div class=\"tiles\">");
+            h.append("<div class=\"tiles\" id=\"totals\">");
             all.tiles(h);
             h.append("</div>");
             h.append("<div class=\"filters\"><input class=\"filter\" id=\"q\" type=\"search\" ")
                     .append("placeholder=\"Text, e.g. Zwembad, 2026-09…\" oninput=\"filterRows()\">")
-                    .append("<select id=\"sport\" onchange=\"filterRows()\"><option value=\"\">All activities</option>");
+                    .append("<select id=\"sport\" onchange=\"autoUnit();filterRows()\"><option value=\"\">All activities</option>");
             for (var g : all.byCount()) {
                 h.append("<option value=\"").append(esc(g.getKey())).append("\">").append(esc(sportName(g.getKey())))
                         .append(" (").append(g.getValue().values().stream().mapToInt(Integer::intValue).sum()).append(")</option>");
@@ -1840,7 +1840,16 @@ public class DescribeGarminFile {
             h.append("</select><label>Distance <input id=\"dmin\" type=\"text\" inputmode=\"decimal\" placeholder=\"min\" oninput=\"filterRows()\">")
                     .append(" – <input id=\"dmax\" type=\"text\" inputmode=\"decimal\" placeholder=\"max\" oninput=\"filterRows()\"> km</label>")
                     .append("<label>Speed <input id=\"smin\" type=\"text\" inputmode=\"decimal\" placeholder=\"min\" oninput=\"filterRows()\">")
-                    .append(" – <input id=\"smax\" type=\"text\" inputmode=\"decimal\" placeholder=\"max\" oninput=\"filterRows()\"> km/h</label>")
+                    .append(" – <input id=\"smax\" type=\"text\" inputmode=\"decimal\" placeholder=\"max\" oninput=\"filterRows()\"> ")
+                    // Pace units for running/walking (min/km) and swimming (min/100 m); "5:00" or "5.0" both work.
+                    .append("<select id=\"sunit\" onchange=\"updUnit();filterRows()\"><option value=\"kmh\">km/h</option>")
+                    .append("<option value=\"km\">min/km</option><option value=\"100\">min/100 m</option></select></label>")
+                    .append("<label>From <input id=\"dfrom\" type=\"date\" onchange=\"filterRows()\"></label>")
+                    .append("<label>to <input id=\"dto\" type=\"date\" onchange=\"filterRows()\"></label><span class=\"ranges\">")
+                    .append("<a href=\"#\" data-range=\"30\" onclick=\"return setRange('30')\">Last 30 days</a>")
+                    .append("<a href=\"#\" data-range=\"month\" onclick=\"return setRange('month')\">This month</a>")
+                    .append("<a href=\"#\" data-range=\"year\" onclick=\"return setRange('year')\">This year</a>")
+                    .append("<a href=\"#\" data-range=\"lastyear\" onclick=\"return setRange('lastyear')\">Last year</a></span>")
                     .append("<span id=\"filterStatus\"></span></div>");
 
             Map<String, List<Entry>> byMonth = new LinkedHashMap<>();
@@ -1851,7 +1860,7 @@ public class DescribeGarminFile {
                 m.getValue().forEach(t::add);
                 h.append("<section class=\"card month\"><h2>").append(first.getMonth().getDisplayName(TextStyle.FULL, Locale.ENGLISH))
                         .append(" ").append(first.getYear()).append("</h2><p class=\"sub\">").append(t.line()).append("</p>")
-                        .append("<div class=\"scroll\"><table><thead><tr><th>Date</th><th>Day</th><th>Activities</th><th>Distance</th>")
+                        .append("<div class=\"scroll\"><table><thead><tr><th>Date</th><th>Day</th><th>Activities</th><th>Distance</th><th>Pace / speed</th>")
                         .append("<th>Activity time</th><th>Activity kcal</th><th>Steps</th><th>Sleep score</th><th>Sleep</th>")
                         .append("<th>Resting HR</th><th>HRV</th><th>Body battery max</th><th>Avg stress</th></tr></thead><tbody>");
                 for (Entry e : m.getValue()) row(h, e);
@@ -1872,6 +1881,7 @@ public class DescribeGarminFile {
             StringBuilder names = new StringBuilder("<div class=\"acts stack\">");
             // One line per activity, aligned with the activity names, instead of a day total.
             StringBuilder dists = new StringBuilder("<div class=\"stack dists\">");
+            StringBuilder paces = new StringBuilder("<div class=\"stack paces\">");
             for (int ai = 0; ai < acts.size(); ai++) {
                 Object o = acts.get(ai);
                 dist += numOr(distanceOf(o), 0);
@@ -1886,6 +1896,7 @@ public class DescribeGarminFile {
                         .append("\" data-sport=\"").append(esc(str(at(o, "sport")))).append("\" data-group=\"")
                         .append(esc(sportGroup(str(at(o, "sport"))))).append("\" data-dist=\"")
                         .append(d == null ? 0 : Math.round(d)).append("\" data-kmh=\"").append(Math.round(kmh * 100) / 100.0)
+                        .append("\" data-dur=\"").append(dur == null ? 0 : Math.round(dur))
                         .append("\" title=\"").append(esc(sportName(str(at(o, "sport")))))
                         .append(kmh > 0 ? " · " + fmtNum(kmh, 1) + " km/h" : "").append("\">")
                         .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name")))).append("</a>");
@@ -1893,19 +1904,32 @@ public class DescribeGarminFile {
                         : corrected ? "<span class=\"corr\" title=\"Corrected from the stroke count; Garmin: "
                                       + (garmin == null ? "–" : fmtDist(garmin)) + "\">≈ " + fmtDist(d) + "</span>"
                         : "<span>" + fmtDist(d) + "</span>");
+                paces.append("<span>").append(kmh > 0 ? esc(paceOrSpeed(str(at(o, "sport")), kmh)) : "<span class=\"muted\">–</span>").append("</span>");
             }
             names.append("</div>");
             dists.append("</div>");
-            h.append("<tr><td><a href=\"").append(esc(e.href)).append("\">").append(e.date).append("</a></td><td>")
+            paces.append("</div>");
+            Double steps = num(s.get("steps"));
+            h.append("<tr data-date=\"").append(e.date).append("\" data-steps=\"").append(steps == null ? 0 : Math.round(steps))
+                    .append("\"><td><a href=\"").append(esc(e.href)).append("\">").append(e.date).append("</a></td><td>")
                     .append(e.date.getDayOfWeek().getDisplayName(TextStyle.SHORT, Locale.ENGLISH)).append("</td><td>")
                     .append(acts.isEmpty() ? "<span class=\"muted\">rest day</span>" : names).append("</td><td class=\"num\"")
-                    .append(dist > 0 ? " data-value=\"" + Math.round(dist) + "\">" + dists : ">").append("</td><td class=\"num\">").append(time > 0 ? fmtDur(time) : "")
+                    .append(dist > 0 ? " data-value=\"" + Math.round(dist) + "\">" + dists : ">").append("</td><td class=\"num\">")
+                    .append(dist > 0 ? paces : "").append("</td><td class=\"num\">").append(time > 0 ? fmtDur(time) : "")
                     .append("</td><td class=\"num\">").append(kcal > 0 ? fmtNum(kcal, 0) : "").append("</td><td class=\"num\">")
                     .append(cell(s, "steps", 0)).append("</td><td class=\"num\">").append(cell(s, "sleepScore", 0))
                     .append("</td><td class=\"num\">").append(num(s.get("sleepSeconds")) == null ? "" : fmtDur(num(s.get("sleepSeconds"))))
                     .append("</td><td class=\"num\">").append(cell(s, "restingHR", 0)).append("</td><td class=\"num\">")
                     .append(cell(s, "hrv", 0)).append("</td><td class=\"num\">").append(cell(s, "bodyBatteryHigh", 0))
                     .append("</td><td class=\"num\">").append(cell(s, "avgStress", 0)).append("</td></tr>");
+        }
+
+        /** Pace for sports where that is how you think about it (min/km, min/100 m), else km/h. */
+        static String paceOrSpeed(String sport, double kmh) {
+            String g = sportGroup(sport);
+            if (g.equals("running") || g.equals("walking")) return fmtPace(kmh / 3.6, false);
+            if (g.equals("swimming")) return fmtPace(kmh / 3.6, true);
+            return fmtNum(kmh, 1) + " km/h";
         }
 
         /**
@@ -2017,11 +2041,12 @@ public class DescribeGarminFile {
             }
 
             void tiles(StringBuilder h) {
-                tile(h, String.valueOf(days), "Days with a report");
-                tile(h, String.valueOf(activities), "Activities");
-                tile(h, fmtDist(dist), "Total distance");
-                tile(h, fmtDur(time), "Total activity time");
-                if (steps > 0) tile(h, fmtNum(steps, 0), "Steps");
+                // The ids let the filter show the totals of what is selected.
+                tile(h, String.valueOf(days), "Days with a report", "tDays");
+                tile(h, String.valueOf(activities), "Activities", "tActs");
+                tile(h, fmtDist(dist), "Total distance", "tDist");
+                tile(h, fmtDur(time), "Total activity time", "tTime");
+                if (steps > 0) tile(h, fmtNum(steps, 0), "Steps", "tSteps");
                 // The clickable activity tiles get their own grid, so they always start on a new row.
                 h.append("</div><div class=\"tiles sports\">");
                 for (var g : byCount()) {
@@ -2030,19 +2055,20 @@ public class DescribeGarminFile {
                             .append("\" data-types=\"").append(esc(String.join(" ", g.getValue().keySet())))
                             .append("\" title=\"Show only ").append(esc(sportName(key)))
                             .append(" activities\" onclick=\"return toggleSport(this.dataset.sport)\"><div class=\"v\">")
-                            .append(esc(sportIcon(key) + " " + count(key))).append("</div><div class=\"l\">").append(esc(sportName(key)));
+                            .append(esc(sportIcon(key))).append(" <span class=\"n\">").append(count(key)).append("</span></div><div class=\"l\">").append(esc(sportName(key)));
                     if (g.getValue().size() > 1) {
                         h.append("<small>");
                         for (var t : typesByCount(g.getValue()))
-                            h.append("<br>").append(t.getValue()).append(" ").append(esc(sportName(t.getKey()).toLowerCase(Locale.ROOT)));
+                            h.append("<br><span data-type=\"").append(esc(t.getKey())).append("\">").append(t.getValue()).append("</span> ")
+                                    .append(esc(sportName(t.getKey()).toLowerCase(Locale.ROOT)));
                         h.append("</small>");
                     }
                     h.append("</div></a>");
                 }
             }
 
-            private static void tile(StringBuilder h, String v, String l) {
-                h.append("<div class=\"tile\"><div class=\"v\">").append(esc(v)).append("</div><div class=\"l\">").append(esc(l)).append("</div></div>");
+            private static void tile(StringBuilder h, String v, String l, String id) {
+                h.append("<div class=\"tile\"><div class=\"v\" id=\"").append(id).append("\">").append(esc(v)).append("</div><div class=\"l\">").append(esc(l)).append("</div></div>");
             }
         }
     }
@@ -3321,6 +3347,13 @@ public class DescribeGarminFile {
             .filters label{color:var(--muted);font-size:14px}
             .filters label input{width:72px}
             #filterStatus{color:var(--muted);font-size:14px}
+            .filters label input[type=date]{width:auto}.filters label select{padding:8px 6px}
+            .ranges{display:flex;flex-wrap:wrap;gap:6px}
+            .ranges a{border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:13px;color:var(--fg);text-decoration:none;background:var(--card)}
+            .ranges a:hover{border-color:var(--accent)}.ranges a.on{border-color:var(--accent);color:var(--accent);font-weight:600}
+            #totals.filtered .tile .v{color:var(--accent)}#totals.filtered .tile .l::after{content:" · selection"}
+            a.tile.link.zero{opacity:.4}
+            .acts .dim,.dists .dim,.paces .dim{opacity:.35}
             .src{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.03em;padding:0 6px;border-radius:5px;color:#fff;vertical-align:1px;line-height:17px}
             .src-fit{background:var(--fit)}.src-tcx{background:var(--tcx)}.src-gpx{background:var(--gpx)}.src-json{background:var(--json)}.src-wellness{background:var(--wellness)}
             .from{font-size:13px;color:var(--muted);margin:14px 0 6px}
@@ -3379,53 +3412,96 @@ public class DescribeGarminFile {
             @media (max-width:560px){.zone{grid-template-columns:90px 1fr 110px}h1{font-size:24px}.card{padding:16px}}
             """;
 
-    /** Overview filters: free text, activity type and distance range, combined per activity; state is kept in the URL hash. */
+    /** Overview filters: text, date range, activity type, distance and speed/pace, combined per activity; the tiles show the selection's totals; state is kept in the URL hash. */
     private static final String OVERVIEW_JS = """
             var F={q:document.getElementById('q'),sport:document.getElementById('sport'),
               min:document.getElementById('dmin'),max:document.getElementById('dmax'),
-              smin:document.getElementById('smin'),smax:document.getElementById('smax')};
+              smin:document.getElementById('smin'),smax:document.getElementById('smax'),su:document.getElementById('sunit'),
+              from:document.getElementById('dfrom'),to:document.getElementById('dto')};
+            var KEYS=['q','sport','min','max','smin','smax','su','from','to'];
             function val(el){var v=parseFloat(el.value.replace(',','.'));return isNaN(v)?null:v;}
             function km(el){var v=val(el);return v===null?null:v*1000;}
-            function toggleSport(sp){F.sport.value=F.sport.value===sp?'':sp;filterRows();
+            // A pace as minutes: "5:30" or "5.5".
+            function paceVal(el){var t=el.value.trim(),m=t.match(/^(\\d+):(\\d{1,2})$/);if(m)return +m[1]+m[2]/60;
+              var v=parseFloat(t.replace(',','.'));return isNaN(v)||v<=0?null:v;}
+            // The speed range in km/h; for a pace the faster (lower) pace is the higher speed.
+            function speedRange(){var u=F.su.value;if(u!=='km'&&u!=='100')return [val(F.smin),val(F.smax)];
+              var k=u==='km'?60:6,a=paceVal(F.smin),b=paceVal(F.smax);return [b===null?null:k/b,a===null?null:k/a];}
+            function groupOf(sp){if(sp.indexOf('t:')!==0)return sp;var t=sp.slice(2),g=t;
+              document.querySelectorAll('.tile.link').forEach(function(x){if((x.dataset.types||'').split(' ').indexOf(t)>=0)g=x.dataset.sport;});return g;}
+            function updUnit(){var p=F.su.value==='kmh'?['min','max']:['m:ss','m:ss'];F.smin.placeholder=p[0];F.smax.placeholder=p[1];}
+            // Picking a sport switches the speed unit to how that sport is measured, unless a speed is already typed.
+            function autoUnit(){if(F.smin.value||F.smax.value)return;var g=groupOf(F.sport.value);
+              F.su.value=g==='running'||g==='walking'?'km':g==='swimming'?'100':'kmh';updUnit();}
+            function ymd(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+            function rangeOf(k){var t=new Date(),y=t.getFullYear();
+              if(k==='30')return [ymd(new Date(y,t.getMonth(),t.getDate()-29)),ymd(t)];
+              if(k==='month')return [ymd(new Date(y,t.getMonth(),1)),ymd(t)];
+              if(k==='year')return [y+'-01-01',ymd(t)];
+              return [(y-1)+'-01-01',(y-1)+'-12-31'];}
+            function setRange(k){var r=rangeOf(k);if(F.from.value===r[0]&&F.to.value===r[1])r=['',''];
+              F.from.value=r[0];F.to.value=r[1];filterRows();return false;}
+            function toggleSport(sp){F.sport.value=F.sport.value===sp?'':sp;autoUnit();filterRows();
               var f=document.querySelector('section.month:not([style*=none])');
               if(F.sport.value&&f)f.scrollIntoView({behavior:'smooth'});return false;}
-            function clearFilters(){['q','sport','min','max','smin','smax'].forEach(function(k){F[k].value='';});filterRows();return false;}
+            function clearFilters(){KEYS.forEach(function(k){F[k].value='';});F.su.value='kmh';updUnit();filterRows();return false;}
+            function fmtKm(m){return m>=1000?(m/1000).toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g,' ')+' km':Math.round(m)+' m';}
+            function fmtDur(s){s=Math.round(s);var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+              return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(x).padStart(2,'0');}
+            function fmtInt(v){return String(Math.round(v)).replace(/\\B(?=(\\d{3})+(?!\\d))/g,' ');}
+            var ALL={};['tDays','tActs','tDist','tTime','tSteps'].forEach(function(id){var e=document.getElementById(id);if(e)ALL[id]=e.textContent;});
+            function setTile(id,v){var e=document.getElementById(id);if(e)e.textContent=v===null?ALL[id]:v;}
             function filterRows(){
               var q=F.q.value.toLowerCase().trim(),sp=F.sport.value,mn=km(F.min),mx=km(F.max),
-                  smn=val(F.smin),smx=val(F.smax),
-                  act=!!sp||mn!==null||mx!==null||smn!==null||smx!==null,n=0,tot=0,days=0;
+                  sr=speedRange(),smn=sr[0],smx=sr[1],from=F.from.value,to=F.to.value,
+                  act=!!sp||mn!==null||mx!==null||smn!==null||smx!==null,any=act||!!q||!!from||!!to,
+                  n=0,tot=0,dur=0,steps=0,days=0,gc={},tc={},
+      // A pace only makes sense for the sports measured in it; other sports never match a pace filter.
+      pg=smn===null&&smx===null?null:F.su.value==='km'?['running','walking']:F.su.value==='100'?['swimming']:null;
               var typ=sp.indexOf('t:')===0?sp.slice(2):null;
-              document.querySelectorAll('.tile.link').forEach(function(t){t.classList.toggle('on',
-                !!sp&&(t.dataset.sport===sp||(typ!==null&&(t.dataset.types||'').split(' ').indexOf(typ)>=0)));});
-              document.querySelectorAll('section.month').forEach(function(s){var any=false;
+              document.querySelectorAll('section.month').forEach(function(s){var shown=false;
                 s.querySelectorAll('tbody tr').forEach(function(r){
-                  var ok=!q||r.textContent.toLowerCase().indexOf(q)>=0,hit=0,d=0;
-                  var dl=r.querySelectorAll('.dists > span');
-                  r.querySelectorAll('[data-sport]').forEach(function(a,i){
+                  var dt=r.dataset.date||'',ok=(!from||dt>=from)&&(!to||dt<=to)&&(!q||r.textContent.toLowerCase().indexOf(q)>=0),hit=0,d=0,t=0;
+                  var dl=r.querySelectorAll('.dists > span'),pl=r.querySelectorAll('.paces > span');
+                  r.querySelectorAll('a.act').forEach(function(a,i){
                     var dist=parseFloat(a.dataset.dist||'0'),v=parseFloat(a.dataset.kmh||'0'),
-                        m=(!sp||(typ!==null?a.dataset.sport===typ:a.dataset.group===sp))&&(mn===null||dist>=mn)&&(mx===null||dist<=mx)
-                          &&(smn===null||(v>0&&v>=smn))&&(smx===null||(v>0&&v<=smx));
-                    a.classList.toggle('dim',act&&!m);if(dl[i])dl[i].classList.toggle('dim',act&&!m);
-                    if(act&&m){hit++;d+=dist;}});
+                        other=(mn===null||dist>=mn)&&(mx===null||dist<=mx)&&(smn===null||(v>0&&v>=smn))&&(smx===null||(v>0&&v<=smx))
+              &&(!pg||pg.indexOf(a.dataset.group)>=0),
+                        m=other&&(!sp||(typ!==null?a.dataset.sport===typ:a.dataset.group===sp));
+                    [a,dl[i],pl[i]].forEach(function(x){if(x)x.classList.toggle('dim',act&&!m);});
+                    // The activity tiles count everything that passes the other filters, so they show what each sport adds.
+                    if(ok&&other){gc[a.dataset.group]=(gc[a.dataset.group]||0)+1;tc[a.dataset.sport]=(tc[a.dataset.sport]||0)+1;}
+                    if(m){hit++;d+=dist;t+=parseFloat(a.dataset.dur||'0');}});
                   if(act&&!hit)ok=false;
-                  if(ok){days++;n+=hit;tot+=d;}
-                  r.style.display=ok?'':'none';any=any||ok;});
-                s.style.display=any?'':'none';});
+                  if(ok){days++;n+=hit;tot+=d;dur+=t;steps+=parseFloat(r.dataset.steps||'0');}
+                  r.style.display=ok?'':'none';shown=shown||ok;});
+                s.style.display=shown?'':'none';});
+              document.getElementById('totals').classList.toggle('filtered',any);
+              setTile('tDays',any?String(days):null);setTile('tActs',any?String(n):null);
+              setTile('tDist',any?fmtKm(tot):null);setTile('tTime',any?fmtDur(dur):null);setTile('tSteps',any?fmtInt(steps):null);
+              document.querySelectorAll('.tile.link').forEach(function(t){
+                t.classList.toggle('on',!!sp&&(t.dataset.sport===sp||(typ!==null&&(t.dataset.types||'').split(' ').indexOf(typ)>=0)));
+                var c=gc[t.dataset.sport]||0;t.querySelector('.n').textContent=c;t.classList.toggle('zero',c===0);
+                t.querySelectorAll('[data-type]').forEach(function(x){x.textContent=tc[x.dataset.type]||0;});});
+              document.querySelectorAll('.ranges a').forEach(function(a){var r=rangeOf(a.dataset.range);
+                a.classList.toggle('on',F.from.value===r[0]&&F.to.value===r[1]);});
               var st=document.getElementById('filterStatus');st.innerHTML='';
-              if(act||q){
-                st.textContent=(act?n+(n===1?' activity on ':' activities on '):'')+days+(days===1?' day':' days')+(act&&tot>0?' · '+(tot/1000).toFixed(2)+' km':'')+' ';
+              if(any){
+                st.textContent=n+(n===1?' activity on ':' activities on ')+days+(days===1?' day':' days')+(tot>0?' · '+fmtKm(tot):'')+(dur>0?' · '+fmtDur(dur):'')+' ';
                 var x=document.createElement('a');x.href='#';x.textContent='✕ clear';x.onclick=clearFilters;st.appendChild(x);}
               var p=new URLSearchParams();
-              if(sp)p.set('sport',sp);['min','max','smin','smax'].forEach(function(k){if(F[k].value)p.set(k,F[k].value);});
+              if(sp)p.set('sport',sp);['min','max','smin','smax','from','to'].forEach(function(k){if(F[k].value)p.set(k,F[k].value);});
+              if((F.smin.value||F.smax.value)&&F.su.value!=='kmh')p.set('su',F.su.value);
               if(q)p.set('q',F.q.value);
               var h=p.toString();history.replaceState(null,'',h?'#'+h:location.pathname+location.search);
               // Remembered so a day report's "← Overview" link can come back to the same filtered view.
               try{localStorage.setItem('garmin-overview-filter',h);}catch(e){}}
             (function(){if(location.hash.length<2){try{localStorage.setItem('garmin-overview-filter','');}catch(e){}return;}
               var p=new URLSearchParams(location.hash.slice(1));
-              ['q','sport','min','max','smin','smax'].forEach(function(k){F[k].value=p.get(k)||'';});
+              KEYS.forEach(function(k){F[k].value=p.get(k)||'';});
               // An older link may name a single Garmin type that is now part of a group.
               var want=p.get('sport');if(want&&F.sport.value!==want){F.sport.value='t:'+want;if(F.sport.value!=='t:'+want)F.sport.value='';}
+              if(p.get('su'))F.su.value=p.get('su');else{F.su.value='kmh';autoUnit();}updUnit();
               filterRows();
               // Coming back from a day report: scroll to that day and mark it briefly ('at' is dropped from the URL).
               var at=p.get('at');if(!at)return;
