@@ -1829,11 +1829,11 @@ public class DescribeGarminFile {
             h.append("<div class=\"filters\"><input class=\"filter\" id=\"q\" type=\"search\" ")
                     .append("placeholder=\"Text, e.g. Zwembad, 2026-09…\" oninput=\"filterRows()\">")
                     .append("<select id=\"sport\" onchange=\"filterRows()\"><option value=\"\">All activities</option>");
-            for (var g : all.groups.entrySet()) {
+            for (var g : all.byCount()) {
                 h.append("<option value=\"").append(esc(g.getKey())).append("\">").append(esc(sportName(g.getKey())))
                         .append(" (").append(g.getValue().values().stream().mapToInt(Integer::intValue).sum()).append(")</option>");
                 // A group of several Garmin types can also be narrowed to one of them ("t:<type>").
-                if (g.getValue().size() > 1) for (var t : g.getValue().entrySet())
+                if (g.getValue().size() > 1) for (var t : Totals.typesByCount(g.getValue()))
                     h.append("<option value=\"t:").append(esc(t.getKey())).append("\">\u2003– ").append(esc(sportName(t.getKey())))
                             .append(" (").append(t.getValue()).append(")</option>");
             }
@@ -1912,14 +1912,25 @@ public class DescribeGarminFile {
          * Garmin activity types that the overview counts together. Garmin's own parent types would put indoor and
          * outdoor rides in one group, so this follows how the rides are actually done; the data keeps Garmin's type.
          */
-        private static final Map<String, String> SPORT_GROUPS = Map.of(
-                "road_biking", "cycling",
-                "virtual_ride", "indoor_cycling",
-                "casual_walking", "walking",
-                "rowing_v2", "rowing_and_paddling",
-                "kayaking_v2", "rowing_and_paddling",
-                "paddling_v2", "rowing_and_paddling",
-                "whitewater_rafting_v2", "rowing_and_paddling");
+        private static final Map<String, String> SPORT_GROUPS = Map.ofEntries(
+                Map.entry("road_biking", "cycling"),
+                Map.entry("mountain_biking", "cycling"),
+                Map.entry("virtual_ride", "indoor_cycling"),
+                Map.entry("casual_walking", "walking"),
+                Map.entry("hiking", "walking"),
+                Map.entry("rowing_v2", "rowing_and_paddling"),
+                Map.entry("kayaking_v2", "rowing_and_paddling"),
+                Map.entry("paddling_v2", "rowing_and_paddling"),
+                Map.entry("whitewater_rafting_v2", "rowing_and_paddling"),
+                Map.entry("track_running", "running"),
+                Map.entry("trail_running", "running"),
+                Map.entry("obstacle_run", "running"),
+                Map.entry("badminton", "racket_sports"),
+                Map.entry("table_tennis", "racket_sports"),
+                Map.entry("multi_sport", "others"),
+                Map.entry("breathwork", "others"),
+                Map.entry("lap_swimming", "swimming"),
+                Map.entry("open_water_swimming", "swimming"));
 
         /**
          * Activity types left out of the overview (tiles, totals and rows); the day report still shows them.
@@ -1963,6 +1974,23 @@ public class DescribeGarminFile {
                 return groups.get(group).values().stream().mapToInt(Integer::intValue).sum();
             }
 
+            /** Groups with the most activities first (ties by name). */
+            List<Map.Entry<String, Map<String, Integer>>> byCount() {
+                return groups.entrySet().stream()
+                        // "others" is the catch-all, so it always comes last.
+                        .sorted(Comparator.<Map.Entry<String, Map<String, Integer>>, Boolean>comparing(g -> g.getKey().equals("others"))
+                                .thenComparingInt(g -> -count(g.getKey()))
+                                .thenComparing(Map.Entry::getKey))
+                        .toList();
+            }
+
+            /** A group's Garmin types, most activities first. */
+            static List<Map.Entry<String, Integer>> typesByCount(Map<String, Integer> types) {
+                return types.entrySet().stream()
+                        .sorted(Map.Entry.<String, Integer>comparingByValue().reversed().thenComparing(Map.Entry::getKey))
+                        .toList();
+            }
+
             void add(Entry e) {
                 days++;
                 List<Object> acts = shown(e.summary);
@@ -1994,7 +2022,9 @@ public class DescribeGarminFile {
                 tile(h, fmtDist(dist), "Total distance");
                 tile(h, fmtDur(time), "Total activity time");
                 if (steps > 0) tile(h, fmtNum(steps, 0), "Steps");
-                for (var g : groups.entrySet()) {
+                // The clickable activity tiles get their own grid, so they always start on a new row.
+                h.append("</div><div class=\"tiles sports\">");
+                for (var g : byCount()) {
                     String key = g.getKey();
                     h.append("<a class=\"tile link\" href=\"#sport=").append(esc(key)).append("\" data-sport=\"").append(esc(key))
                             .append("\" data-types=\"").append(esc(String.join(" ", g.getValue().keySet())))
@@ -2003,7 +2033,7 @@ public class DescribeGarminFile {
                             .append(esc(sportIcon(key) + " " + count(key))).append("</div><div class=\"l\">").append(esc(sportName(key)));
                     if (g.getValue().size() > 1) {
                         h.append("<small>");
-                        for (var t : g.getValue().entrySet())
+                        for (var t : typesByCount(g.getValue()))
                             h.append("<br>").append(t.getValue()).append(" ").append(esc(sportName(t.getKey()).toLowerCase(Locale.ROOT)));
                         h.append("</small>");
                     }
@@ -3135,6 +3165,8 @@ public class DescribeGarminFile {
         if (s.contains("hik")) return "🥾";
         if (s.contains("strength") || s.contains("training")) return "🏋";
         if (s.contains("yoga")) return "🧘";
+        if (s.contains("table_tennis")) return "🏓";
+        if (s.contains("badminton") || s.contains("racket")) return "🏸";
         if (s.contains("row") || s.contains("kayak") || s.contains("paddl") || s.contains("raft")) return "🚣";
         return "⏱";
     }
