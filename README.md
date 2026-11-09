@@ -5,6 +5,7 @@ Android phones, and local video files.
 
 ## Prerequisites
 
+- GitHub: https://github.com/brtlckx03/louckxb-onedrive
 - **Java 25+** (the project is configured for Java 25; some tools use preview features)
 - **Maven 3.9+** (optional, for building)
 - A **personal Microsoft account** with OneDrive
