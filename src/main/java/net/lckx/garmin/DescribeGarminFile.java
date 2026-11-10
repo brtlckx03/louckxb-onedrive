@@ -65,7 +65,7 @@ public class DescribeGarminFile {
     public static void main(String[] args) throws Exception {
         LocalDate since = null, until = null;
         Path out = null;
-        boolean open = false;
+        boolean open = false, all = false;
         List<LocalDate> positional = new ArrayList<>();
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
@@ -73,6 +73,7 @@ public class DescribeGarminFile {
                 case "--until", "--to" -> until = LocalDate.parse(args[++i]);
                 case "--out" -> out = Path.of(args[++i]);
                 case "--open" -> open = true;
+                case "--all" -> all = true;
                 case "-h", "--help" -> {
                     printUsage();
                     return;
@@ -94,6 +95,11 @@ public class DescribeGarminFile {
             System.exit(1);
         }
         LocalDate latest = latestData.get();
+        if (all) {
+            // Every day with data, e.g. after a change to how reports look.
+            since = earliestDate().orElse(latest);
+            until = latest;
+        }
         if (since == null) {
             since = promptForDate("From date (YYYY-MM-DD)", latest);
             until = promptForDate("Until date (YYYY-MM-DD)", since);
@@ -136,6 +142,7 @@ public class DescribeGarminFile {
                        DescribeGarminFile YYYY-MM-DD [--out f.html]    one day
                        DescribeGarminFile YYYY-MM-DD YYYY-MM-DD        every day in the range
                        DescribeGarminFile --since YYYY-MM-DD [--until YYYY-MM-DD]
+                       DescribeGarminFile --all                        every day with data (after a change to the reports)
                 Options: --open  open the report (one day) or the overview (range) when done""");
     }
 
@@ -217,6 +224,15 @@ public class DescribeGarminFile {
     // ------------------------------------------------------------------ locating files
 
     private static Optional<LocalDate> latestDate() throws IOException {
+        return dataDate(true);
+    }
+
+    private static Optional<LocalDate> earliestDate() throws IOException {
+        return dataDate(false);
+    }
+
+    /** The latest (or earliest) day with an activity, else with a wellness file. */
+    private static Optional<LocalDate> dataDate(boolean latest) throws IOException {
         if (!Files.isDirectory(DATA_DIR)) return Optional.empty();
         LocalDate latestActivity = null, latestWellness = null;
         try (Stream<Path> s = Files.walk(DATA_DIR)) {
@@ -226,11 +242,11 @@ public class DescribeGarminFile {
                 var m = ACTIVITY_FILE.matcher(n);
                 if (m.matches()) {
                     LocalDate d = LocalDate.parse(m.group(1));
-                    if (latestActivity == null || d.isAfter(latestActivity)) latestActivity = d;
+                    if (latestActivity == null || (latest ? d.isAfter(latestActivity) : d.isBefore(latestActivity))) latestActivity = d;
                 } else if (p.getParent() != null && p.getParent().getFileName().toString().equals("wellness")
                         && n.matches("\\d{4}-\\d{2}-\\d{2}\\.json")) {
                     LocalDate d = LocalDate.parse(n.substring(0, 10));
-                    if (latestWellness == null || d.isAfter(latestWellness)) latestWellness = d;
+                    if (latestWellness == null || (latest ? d.isAfter(latestWellness) : d.isBefore(latestWellness))) latestWellness = d;
                 }
             }
         }
@@ -439,7 +455,11 @@ public class DescribeGarminFile {
             h.append("<footer>Generated ").append(DT.format(LocalDateTime.now()))
                     .append(" by DescribeGarminFile from files in <code>").append(esc(DATA_DIR.toString()))
                     .append("</code>. Hover a chart for exact values; hover a tile to see the exact field.</footer>");
-            h.append("</main><div id=\"tip\"></div><script>").append(JS).append("</script></body></html>");
+            String base = overviewHref.replace('\\', '/');
+            base = base.contains("/") ? base.substring(0, base.lastIndexOf('/') + 1) : "";
+            h.append("</main><div id=\"tip\"></div><script src=\"").append(esc(base)).append(DAYS_FILE).append("\"></script>")
+                    .append("<script>var DAY_BASE=").append(jsStr(base)).append(",THIS_DAY=\"").append(day.date).append("\";")
+                    .append(DAY_STEP_JS).append(JS).append("</script></body></html>");
             return h.toString();
         }
 
@@ -539,6 +559,9 @@ public class DescribeGarminFile {
         void nav() {
             // Sticky bar: back to the overview, plus jumps within the page when there is more than one section.
             h.append("<nav><a class=\"home\" href=\"").append(esc(overviewHref.replace('\\', '/'))).append("\" data-day=\"").append(day.date).append("\" onclick=\"return toOverview(this)\">← Overview</a>");
+            // Filled in from days.js (written with the overview), so they stay right when later days are added.
+            h.append("<a class=\"day-step\" id=\"prevDay\" hidden title=\"Previous day with a report (←)\"></a>")
+                    .append("<a class=\"day-step\" id=\"nextDay\" hidden title=\"Next day with a report (→)\"></a>");
             if (day.activities.size() + (day.wellness != null ? 1 : 0) < 2) {
                 h.append("</nav>");
                 return;
@@ -1790,6 +1813,10 @@ public class DescribeGarminFile {
             Files.writeString(tmp, render(entries), StandardCharsets.UTF_8);
             // Replace in one step, so a browser refreshing during a download never sees half a page.
             Files.move(tmp, out, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            // The list of all reports, oldest first, for the previous/next day links in the reports.
+            StringBuilder js = new StringBuilder("window.GARMIN_DAYS=[");
+            for (Entry e : cache.values()) js.append(js.charAt(js.length() - 1) == '[' ? "" : ",").append(jsStr(e.href));
+            Files.writeString(DATA_DIR.resolve(DAYS_FILE), js.append("];\n"), StandardCharsets.UTF_8);
             return out;
         }
 
@@ -1852,6 +1879,22 @@ public class DescribeGarminFile {
                     .append("<a href=\"#\" data-range=\"lastyear\" onclick=\"return setRange('lastyear')\">Last year</a></span>")
                     .append("<span id=\"filterStatus\"></span></div>");
 
+            // Filled in by the page script from the visible rows, so the records follow the filters.
+            // The chart, calendar and records are folded away by default; these buttons open them.
+            h.append("<div class=\"ranges panels\"><a href=\"#\" data-panel=\"trend\" onclick=\"return togglePanel('trend')\">📊 Chart</a>")
+                    .append("<a href=\"#\" data-panel=\"calendar\" onclick=\"return togglePanel('calendar')\">📅 Calendar</a>")
+                    .append("<a href=\"#\" data-panel=\"records\" onclick=\"return togglePanel('records')\">🏆 Records</a></div>");
+            h.append("<section class=\"card panel folded\" id=\"trend\" hidden><div class=\"trend-head\"><h2 id=\"trendTitle\">Per month</h2>")
+                    .append("<span class=\"ranges\" id=\"trendMetric\"><a href=\"#\" data-m=\"dist\" onclick=\"return setMetric('dist')\">Distance</a>")
+                    .append("<a href=\"#\" data-m=\"dur\" onclick=\"return setMetric('dur')\">Time</a>")
+                    .append("<a href=\"#\" data-m=\"n\" onclick=\"return setMetric('n')\">Activities</a></span></div>")
+                    .append("<p class=\"sub\" id=\"trendSub\"></p><div class=\"legend\" id=\"trendLegend\"></div><div id=\"trendChart\"></div></section>");
+            h.append("<section class=\"card panel folded\" id=\"calendar\" hidden><div class=\"trend-head\"><h2 id=\"calTitle\">Calendar</h2>")
+                    .append("<span class=\"ranges\"><a href=\"#\" id=\"calPrev\" onclick=\"return stepCal(-1)\">‹</a>")
+                    .append("<a href=\"#\" id=\"calNext\" onclick=\"return stepCal(1)\">›</a></span></div>")
+                    .append("<p class=\"sub\" id=\"calSub\"></p><div class=\"legend\" id=\"calLegend\"></div><div id=\"calChart\"></div></section>");
+            h.append("<section class=\"card panel folded\" id=\"records\" hidden><h2>Records</h2><p class=\"sub\" id=\"recordsSub\"></p>")
+                    .append("<div class=\"tiles\" id=\"recordTiles\"></div></section>");
             Map<String, List<Entry>> byMonth = new LinkedHashMap<>();
             for (Entry e : entries) byMonth.computeIfAbsent(e.date.toString().substring(0, 7), k -> new ArrayList<>()).add(e);
             for (var m : byMonth.entrySet()) {
@@ -3218,6 +3261,11 @@ public class DescribeGarminFile {
         return fmtDur(minPerKm * 60);
     }
 
+    /** A JavaScript string literal (also safe inside a <script> element). */
+    static String jsStr(String v) {
+        return "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"").replace("<", "\\u003c") + "\"";
+    }
+
     static String fmtNum(double v, int decimals) {
         return String.format(Locale.ROOT, "%,." + decimals + "f", v).replace(",", " ");
     }
@@ -3317,9 +3365,10 @@ public class DescribeGarminFile {
             :root{--bg:#f6f7f9;--card:#fff;--fg:#1d2329;--muted:#6b7682;--line:#e3e7ec;--accent:#2563eb;
               --c-hr:#e5484d;--c-speed:#2563eb;--c-alt:#16a34a;--c-cad:#d97706;--c-pow:#9333ea;--c-temp:#0891b2;--c-resp:#0d9488;
               --c-stress:#ea580c;--c-bb:#2563eb;--c-deep:#1e3a8a;--c-light:#60a5fa;--c-rem:#c084fc;--c-awake:#f472b6;
-              --fit:#7c3aed;--tcx:#0891b2;--gpx:#16a34a;--json:#d97706;--wellness:#e11d48}
+              --fit:#7c3aed;--tcx:#0891b2;--gpx:#16a34a;--json:#d97706;--wellness:#e11d48;
+              --s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300}
             @media (prefers-color-scheme:dark){:root{--bg:#0f1317;--card:#171c21;--fg:#e6e9ec;--muted:#8d98a3;--line:#2a3138;
-              --c-deep:#3b5bdb;--c-light:#74a9f7}}
+              --c-deep:#3b5bdb;--c-light:#74a9f7;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300}}
             *{box-sizing:border-box}
             body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
             main{max-width:1100px;margin:0 auto;padding:24px 16px 60px}
@@ -3353,6 +3402,12 @@ public class DescribeGarminFile {
             .ranges a:hover{border-color:var(--accent)}.ranges a.on{border-color:var(--accent);color:var(--accent);font-weight:600}
             #totals.filtered .tile .v{color:var(--accent)}#totals.filtered .tile .l::after{content:" · selection"}
             a.tile.link.zero{opacity:.4}
+            .trend-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}
+            #trendChart svg{width:100%;height:auto;display:block}#trendChart rect.hit:hover{fill:color-mix(in srgb,var(--fg) 6%,transparent)}
+            #tip b{font-weight:650}
+            section.panel.folded{display:none}.panels{margin:4px 0 8px}
+            #calChart svg{width:100%;height:auto;display:block;max-width:900px}#calChart rect.day:hover{stroke:var(--fg);stroke-width:1.5}
+            #calendar .ranges a{min-width:34px;text-align:center}
             .acts .dim,.dists .dim,.paces .dim{opacity:.35}
             .src{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.03em;padding:0 6px;border-radius:5px;color:#fff;vertical-align:1px;line-height:17px}
             .src-fit{background:var(--fit)}.src-tcx{background:var(--tcx)}.src-gpx{background:var(--gpx)}.src-json{background:var(--json)}.src-wellness{background:var(--wellness)}
@@ -3455,13 +3510,14 @@ public class DescribeGarminFile {
               var q=F.q.value.toLowerCase().trim(),sp=F.sport.value,mn=km(F.min),mx=km(F.max),
                   sr=speedRange(),smn=sr[0],smx=sr[1],from=F.from.value,to=F.to.value,
                   act=!!sp||mn!==null||mx!==null||smn!==null||smx!==null,any=act||!!q||!!from||!!to,
-                  n=0,tot=0,dur=0,steps=0,days=0,gc={},tc={},
+                  n=0,tot=0,dur=0,steps=0,days=0,gc={},tc={},recs=[],
       // A pace only makes sense for the sports measured in it; other sports never match a pace filter.
       pg=smn===null&&smx===null?null:F.su.value==='km'?['running','walking']:F.su.value==='100'?['swimming']:null;
               var typ=sp.indexOf('t:')===0?sp.slice(2):null;
               document.querySelectorAll('section.month').forEach(function(s){var shown=false;
                 s.querySelectorAll('tbody tr').forEach(function(r){
-                  var dt=r.dataset.date||'',ok=(!from||dt>=from)&&(!to||dt<=to)&&(!q||r.textContent.toLowerCase().indexOf(q)>=0),hit=0,d=0,t=0;
+                  var rowActs=[];
+      var dt=r.dataset.date||'',ok=(!from||dt>=from)&&(!to||dt<=to)&&(!q||r.textContent.toLowerCase().indexOf(q)>=0),hit=0,d=0,t=0;
                   var dl=r.querySelectorAll('.dists > span'),pl=r.querySelectorAll('.paces > span');
                   r.querySelectorAll('a.act').forEach(function(a,i){
                     var dist=parseFloat(a.dataset.dist||'0'),v=parseFloat(a.dataset.kmh||'0'),
@@ -3471,12 +3527,14 @@ public class DescribeGarminFile {
                     [a,dl[i],pl[i]].forEach(function(x){if(x)x.classList.toggle('dim',act&&!m);});
                     // The activity tiles count everything that passes the other filters, so they show what each sport adds.
                     if(ok&&other){gc[a.dataset.group]=(gc[a.dataset.group]||0)+1;tc[a.dataset.sport]=(tc[a.dataset.sport]||0)+1;}
-                    if(m){hit++;d+=dist;t+=parseFloat(a.dataset.dur||'0');}});
+                    if(m){hit++;d+=dist;t+=parseFloat(a.dataset.dur||'0');
+          rowActs.push({a:a,date:dt,group:a.dataset.group,dist:dist,kmh:v,dur:parseFloat(a.dataset.dur||'0')});}});
                   if(act&&!hit)ok=false;
-                  if(ok){days++;n+=hit;tot+=d;dur+=t;steps+=parseFloat(r.dataset.steps||'0');}
+                  if(ok){days++;n+=hit;tot+=d;dur+=t;steps+=parseFloat(r.dataset.steps||'0');recs.push.apply(recs,rowActs);}
                   r.style.display=ok?'':'none';shown=shown||ok;});
                 s.style.display=shown?'':'none';});
-              document.getElementById('totals').classList.toggle('filtered',any);
+              renderRecords(recs,any);renderTrend(recs,from,to);CAL.year=null;renderCalendar(recs,to);
+  document.getElementById('totals').classList.toggle('filtered',any);
               setTile('tDays',any?String(days):null);setTile('tActs',any?String(n):null);
               setTile('tDist',any?fmtKm(tot):null);setTile('tTime',any?fmtDur(dur):null);setTile('tSteps',any?fmtInt(steps):null);
               document.querySelectorAll('.tile.link').forEach(function(t){
@@ -3496,7 +3554,151 @@ public class DescribeGarminFile {
               var h=p.toString();history.replaceState(null,'',h?'#'+h:location.pathname+location.search);
               // Remembered so a day report's "← Overview" link can come back to the same filtered view.
               try{localStorage.setItem('garmin-overview-filter',h);}catch(e){}}
-            (function(){if(location.hash.length<2){try{localStorage.setItem('garmin-overview-filter','');}catch(e){}return;}
+            // ---- records, from the activities the filters leave
+            // Speeds above these are GPS glitches (or a ride saved as a run), not records.
+            var MAX_KMH={running:20,walking:12,swimming:8,cycling:65,indoor_cycling:70,rowing_and_paddling:20};
+            function paceStr(kmh,per100){return fmtDur((per100?360:3600)/kmh)+(per100?' /100 m':' /km');}
+            var RECORDS=[
+              {label:'Longest run',g:'running',by:'dist'},
+              {label:'Fastest run, 5 km or more',g:'running',min:5000,by:'kmh'},
+              {label:'Fastest run, 10 km or more',g:'running',min:10000,by:'kmh'},
+              {label:'Fastest half marathon or more',g:'running',min:21000,by:'kmh'},
+              {label:'Fastest marathon or more',g:'running',min:42000,by:'kmh'},
+              {label:'Longest ride',g:'cycling',by:'dist'},
+              {label:'Fastest ride, 40 km or more',g:'cycling',min:40000,by:'kmh'},
+              {label:'Fastest ride, 100 km or more',g:'cycling',min:100000,by:'kmh'},
+              {label:'Longest indoor ride',g:'indoor_cycling',by:'dur'},
+              {label:'Longest walk or hike',g:'walking',by:'dist'},
+              {label:'Longest swim',g:'swimming',by:'dist'},
+              {label:'Fastest swim, 1 km or more',g:'swimming',min:1000,by:'kmh'},
+              {label:'Longest row or paddle',g:'rowing_and_paddling',by:'dist'}];
+            function renderRecords(list,any){
+              var box=document.getElementById('records'),tiles=document.getElementById('recordTiles');tiles.innerHTML='';
+              RECORDS.forEach(function(rec){var best=null;
+                list.forEach(function(x){
+                  if(rec.g&&x.group!==rec.g)return;if(rec.min&&x.dist<rec.min)return;
+                  if(rec.by==='kmh'&&(!(x.kmh>0)||x.kmh>(MAX_KMH[x.group]||999)))return;
+                  var v=x[rec.by];if(!(v>0))return;if(!best||v>best[rec.by])best=x;});
+                if(!best)return;
+                var per100=best.group==='swimming',pace=best.group==='running'||best.group==='walking'||per100;
+                var v=rec.by==='dist'?fmtKm(best.dist):rec.by==='dur'?fmtDur(best.dur):pace?paceStr(best.kmh,per100):best.kmh.toFixed(1)+' km/h';
+                var extra=rec.by==='kmh'?fmtKm(best.dist)+' in '+fmtDur(best.dur):rec.by==='dist'?fmtDur(best.dur)+(best.kmh>0?' · '+(pace?paceStr(best.kmh,per100):best.kmh.toFixed(1)+' km/h'):''):(best.dist>0?fmtKm(best.dist):'');
+                var t=document.createElement('a');t.className='tile link';t.href=best.a.getAttribute('href');t.title='Open this activity';
+                var vd=document.createElement('div');vd.className='v';vd.textContent=v;
+                var ld=document.createElement('div');ld.className='l';ld.textContent=rec.label;
+                var sm=document.createElement('small');sm.innerHTML='<br>';sm.appendChild(document.createTextNode(best.date+' · '+best.a.textContent.trim()));
+                sm.appendChild(document.createElement('br'));sm.appendChild(document.createTextNode(extra));
+                ld.appendChild(sm);t.appendChild(vd);t.appendChild(ld);tiles.appendChild(t);});
+              box.hidden=!tiles.children.length;
+              document.getElementById('recordsSub').textContent=any?'Within the current selection. Click a record to open the activity.'
+                :'All activities. They follow the filters above, e.g. pick This year for this year’s records. Click a record to open the activity.';}
+            // ---- per period chart (distance, time or count), stacked by sport; also follows the filters
+            var SERIES=[['running','Running'],['cycling','Cycling'],['indoor_cycling','Indoor cycling'],['walking','Walking'],['swimming','Swimming'],['other','Other']];
+            var METRIC='dist';try{METRIC=localStorage.getItem('garmin-overview-metric')||'dist';}catch(e){}
+            var LAST={recs:[],from:'',to:''};
+            function setMetric(m){METRIC=m;try{localStorage.setItem('garmin-overview-metric',m);}catch(e){}renderTrend(LAST.recs,LAST.from,LAST.to);return false;}
+            var MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            var MONTHS_FULL=['January','February','March','April','May','June','July','August','September','October','November','December'];
+            function seriesOf(g){for(var i=0;i<5;i++)if(SERIES[i][0]===g)return i;return 5;}
+            function utc(s){return new Date(Date.UTC(+s.slice(0,4),+s.slice(5,7)-1,+s.slice(8,10)));}
+            function iso(d){return d.toISOString().slice(0,10);}
+            function metricStr(v){return METRIC==='dist'?(v>=100?fmtInt(v):v.toFixed(1))+' km':METRIC==='dur'?(v>=10?fmtInt(v):Math.floor(v)+':'+String(Math.round(v%1*60)).padStart(2,'0'))+' h':fmtInt(v);}
+            function renderTrend(recs,from,to){LAST={recs:recs,from:from,to:to};
+              var box=document.getElementById('trend');if(!recs.length){box.hidden=true;return;}box.hidden=false;
+              var lo=from,hi=to;recs.forEach(function(r){if(!from&&(!lo||r.date<lo))lo=r.date;if(!to&&(!hi||r.date>hi))hi=r.date;});
+              var a=utc(lo),b=utc(hi),months=(b.getUTCFullYear()-a.getUTCFullYear())*12+b.getUTCMonth()-a.getUTCMonth()+1;
+              var unit=(b-a)/864e5<=62?'day':months<=36?'month':'year',keys=[],idx={};
+              if(unit==='day')for(var d=new Date(a);d<=b;d.setUTCDate(d.getUTCDate()+1))keys.push(iso(d));
+              else if(unit==='month')for(var y=a.getUTCFullYear(),m=a.getUTCMonth();y*12+m<=b.getUTCFullYear()*12+b.getUTCMonth();m++){if(m===12){m=0;y++;}keys.push(y+'-'+String(m+1).padStart(2,'0'));}
+              else for(var y2=a.getUTCFullYear();y2<=b.getUTCFullYear();y2++)keys.push(String(y2));
+              var cut=unit==='day'?10:unit==='month'?7:4;keys.forEach(function(k,i){idx[k]=i;});
+              var vals=keys.map(function(){return [0,0,0,0,0,0];}),used=[0,0,0,0,0,0];
+              recs.forEach(function(r){var i=idx[r.date.slice(0,cut)];if(i===undefined)return;
+                var v=METRIC==='dist'?r.dist/1000:METRIC==='dur'?r.dur/3600:1;var s=seriesOf(r.group);vals[i][s]+=v;used[s]+=v;});
+              var totals=vals.map(function(v){return v.reduce(function(x,y){return x+y;},0);}),max=Math.max.apply(null,totals.concat([0]));
+              var what=METRIC==='dist'?'Distance':METRIC==='dur'?'Time':'Activities';
+              document.getElementById('trendTitle').textContent=what+' per '+unit;
+              document.getElementById('trendSub').textContent=(unit==='day'?'':'Click a bar to zoom in to that '+unit+'. ')+'Follows the filters above.';
+              document.querySelectorAll('#trendMetric a').forEach(function(x){x.classList.toggle('on',x.dataset.m===METRIC);});
+              var lg=document.getElementById('trendLegend');lg.innerHTML='';
+              SERIES.forEach(function(s,i){if(!used[i])return;var e=document.createElement('span');var sw=document.createElement('i');sw.style.background='var(--s'+(i+1)+')';
+                e.appendChild(sw);e.appendChild(document.createTextNode(s[1]+' '+metricStr(used[i])));lg.appendChild(e);});
+              // Axis: a round step so there are 3-5 grid lines.
+              var step=1;if(max>0){var raw=max/4,p=Math.pow(10,Math.floor(Math.log10(raw)));step=[1,2,2.5,5,10].map(function(f){return f*p;}).find(function(x){return x>=raw;});}
+              var top=max>0?Math.ceil(max/step)*step:1,W=1000,H=240,L=56,R=8,T=10,B=26,pw=W-L-R,ph=H-T-B,bw=pw/keys.length,w=Math.max(1,Math.min(bw*0.72,48));
+              var o=['<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="'+what+' per '+unit+'">'];
+              for(var g=0;g<=top+1e-9;g+=step){var gy=T+ph-g/top*ph;o.push('<line class="grid" x1="'+L+'" x2="'+(W-R)+'" y1="'+gy+'" y2="'+gy+'"/><text class="ax" x="'+(L-6)+'" y="'+(gy+4)+'" text-anchor="end">'+(g%1?g.toFixed(1):fmtInt(g))+'</text>');}
+              var every=Math.ceil(keys.length/(unit==='year'?20:12));
+              keys.forEach(function(k,i){var x=L+i*bw+(bw-w)/2,y=T+ph,segs=[];
+                for(var s=0;s<6;s++){var v=vals[i][s];if(!v)continue;var hgt=v/top*ph;segs.push([s,y-hgt,hgt]);y-=hgt;}
+                segs.forEach(function(sg,j){var gap=j<segs.length-1&&sg[2]>3?2:0,yy=sg[1]+gap,hh=Math.max(sg[2]-gap,0.5);
+                  if(j===segs.length-1&&w>=6&&hh>4){var r=Math.min(4,w/2);
+                    o.push('<path fill="var(--s'+(sg[0]+1)+')" d="M'+x+' '+(yy+hh)+'V'+(yy+r)+'Q'+x+' '+yy+' '+(x+r)+' '+yy+'H'+(x+w-r)+'Q'+(x+w)+' '+yy+' '+(x+w)+' '+(yy+r)+'V'+(yy+hh)+'Z"/>');}
+                  else o.push('<rect fill="var(--s'+(sg[0]+1)+')" x="'+x+'" y="'+yy+'" width="'+w+'" height="'+hh+'"/>');});
+                if(i%every===0){var lab=unit==='year'?k:unit==='month'?MONTHS[+k.slice(5)-1]+(k.slice(5)==='01'||i===0?' '+k.slice(0,4):''):(+k.slice(8))+(k.slice(8)==='01'||i===0?' '+MONTHS[+k.slice(5,7)-1]:'');
+                  o.push('<text class="ax" x="'+(L+i*bw+bw/2)+'" y="'+(H-8)+'" text-anchor="middle">'+lab+'</text>');}
+                o.push('<rect class="hit" data-i="'+i+'" x="'+(L+i*bw)+'" y="'+T+'" width="'+bw+'" height="'+ph+'" fill="transparent"/>');});
+              o.push('</svg>');
+              var c=document.getElementById('trendChart');c.innerHTML=o.join('');
+              var tip=document.getElementById('tip');
+              function name(k){return unit==='year'?k:unit==='month'?MONTHS_FULL[+k.slice(5)-1]+' '+k.slice(0,4):k+' '+['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][utc(k).getUTCDay()];}
+              c.querySelectorAll('rect.hit').forEach(function(h){var i=+h.dataset.i,k=keys[i];
+                if(unit!=='day')h.style.cursor='pointer';
+                h.addEventListener('mousemove',function(ev){var t='<b>'+name(k)+' · '+metricStr(totals[i])+'</b>';
+                  for(var s=0;s<6;s++)if(vals[i][s])t+='<br>'+SERIES[s][1]+': '+metricStr(vals[i][s]);
+                  tip.innerHTML=t;tip.style.display='block';tip.style.left=Math.min(ev.clientX+12,window.innerWidth-tip.offsetWidth-8)+'px';tip.style.top=(ev.clientY-tip.offsetHeight-10)+'px';});
+                h.addEventListener('mouseleave',function(){tip.style.display='none';});
+                h.addEventListener('click',function(){if(unit==='day'){var row=document.querySelector('tr[data-date="'+k+'"]');if(row)row.scrollIntoView({block:'center'});return;}
+                  tip.style.display='none';
+                  if(unit==='year'){F.from.value=k+'-01-01';F.to.value=k+'-12-31';}
+                  else{var e=new Date(Date.UTC(+k.slice(0,4),+k.slice(5,7),0));F.from.value=k+'-01';F.to.value=iso(e);}
+                  filterRows();});});}
+            // ---- calendar: one square per day of a year, coloured by the day's main sport (most time)
+            var CAL={year:null,recs:[],to:''},DAY_HREF=null;
+            function stepCal(d){CAL.year+=d;renderCalendar(CAL.recs,CAL.to);return false;}
+            function renderCalendar(recs,to){CAL.recs=recs;CAL.to=to;
+              var box=document.getElementById('calendar');if(!recs.length){box.hidden=true;return;}box.hidden=false;
+              if(!DAY_HREF){DAY_HREF={};document.querySelectorAll('tr[data-date]').forEach(function(r){var a=r.querySelector('td a');if(a)DAY_HREF[r.dataset.date]=a.getAttribute('href');});}
+              var minY=+recs.reduce(function(m,r){return r.date<m?r.date:m;},'9999').slice(0,4),maxY=+recs.reduce(function(m,r){return r.date>m?r.date:m;},'0000').slice(0,4);
+              if(CAL.year===null)CAL.year=to?Math.min(+to.slice(0,4),maxY):maxY;
+              CAL.year=Math.max(minY,Math.min(maxY,CAL.year));var Y=CAL.year;
+              document.getElementById('calPrev').style.visibility=Y>minY?'':'hidden';document.getElementById('calNext').style.visibility=Y<maxY?'':'hidden';
+              var byDay={};recs.forEach(function(r){if(+r.date.slice(0,4)!==Y)return;(byDay[r.date]=byDay[r.date]||[]).push(r);});
+              var C=14,G=3,L=30,T=18,jan1=new Date(Date.UTC(Y,0,1)),off=(jan1.getUTCDay()+6)%7,o=[],used=[0,0,0,0,0,0];
+              var days=(Date.UTC(Y+1,0,1)-jan1)/864e5,weeks=Math.ceil((days+off)/7),W=L+weeks*(C+G),H=T+7*(C+G);
+              o.push('<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Activity calendar '+Y+'">');
+              ['Mon','','Wed','','Fri','',''].forEach(function(n,i){if(n)o.push('<text class="ax" x="0" y="'+(T+i*(C+G)+C-3)+'">'+n+'</text>');});
+              var active=0,streak=0,best=0,run=0;
+              for(var i=0;i<days;i++){var d=new Date(jan1.getTime()+i*864e5),k=iso(d),wk=Math.floor((i+off)/7),wd=(i+off)%7,x=L+wk*(C+G),y=T+wd*(C+G);
+                if(d.getUTCDate()===1)o.push('<text class="ax" x="'+x+'" y="'+(T-6)+'">'+MONTHS[d.getUTCMonth()]+'</text>');
+                var list=byDay[k],fill;
+                if(list){var t=[0,0,0,0,0,0];list.forEach(function(r){t[seriesOf(r.group)]+=r.dur||1;});var s=t.indexOf(Math.max.apply(null,t));used[s]++;
+                  fill='var(--s'+(s+1)+')';active++;run++;best=Math.max(best,run);}
+                else{run=0;fill=DAY_HREF[k]?'var(--line)':'transparent';}
+                o.push('<rect class="day" data-d="'+k+'" x="'+x+'" y="'+y+'" width="'+C+'" height="'+C+'" rx="3" fill="'+fill+'"'+(fill==='transparent'?' stroke="var(--line)"':'')+'/>');}
+              o.push('</svg>');
+              var c=document.getElementById('calChart');c.innerHTML=o.join('');
+              document.getElementById('calTitle').textContent='Calendar '+Y;
+              document.getElementById('calSub').textContent=active+' active days · longest streak '+best+(best===1?' day':' days')+'. Coloured by the sport with the most time that day; click a day to open it.';
+              var lg=document.getElementById('calLegend');lg.innerHTML='';
+              SERIES.forEach(function(s,i){if(!used[i])return;var e=document.createElement('span'),sw=document.createElement('i');sw.style.background='var(--s'+(i+1)+')';
+                e.appendChild(sw);e.appendChild(document.createTextNode(s[1]+' '+used[i]+(used[i]===1?' day':' days')));lg.appendChild(e);});
+              var e=document.createElement('span'),sw=document.createElement('i');sw.style.background='var(--line)';e.appendChild(sw);e.appendChild(document.createTextNode('nothing that matches'));lg.appendChild(e);
+              var tip=document.getElementById('tip');
+              c.querySelectorAll('rect.day').forEach(function(r){var k=r.dataset.d;if(DAY_HREF[k])r.style.cursor='pointer';
+                r.addEventListener('mousemove',function(ev){var list=byDay[k],t='<b>'+k+' '+['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][utc(k).getUTCDay()]+'</b>';
+                  if(list)list.forEach(function(x){t+='<br>';var sp=document.createElement('span');sp.textContent=x.a.textContent.trim()+(x.dist>0?' · '+fmtKm(x.dist):'')+(x.dur>0?' · '+fmtDur(x.dur):'');t+=sp.innerHTML;});
+                  else t+='<br>'+(DAY_HREF[k]?'nothing that matches':'no data');
+                  tip.innerHTML=t;tip.style.display='block';tip.style.left=Math.min(ev.clientX+12,window.innerWidth-tip.offsetWidth-8)+'px';tip.style.top=(ev.clientY-tip.offsetHeight-10)+'px';});
+                r.addEventListener('mouseleave',function(){tip.style.display='none';});
+                r.addEventListener('click',function(){if(DAY_HREF[k])location.href=DAY_HREF[k];});});}
+            // ---- folding panels (chart, calendar, records); which ones are open is remembered
+            var OPEN={};try{OPEN=JSON.parse(localStorage.getItem('garmin-overview-panels')||'{}')||{};}catch(e){}
+            function showPanels(){document.querySelectorAll('[data-panel]').forEach(function(b){var id=b.dataset.panel,on=!!OPEN[id];
+              b.classList.toggle('on',on);document.getElementById(id).classList.toggle('folded',!on);});}
+            function togglePanel(id){OPEN[id]=!OPEN[id];try{localStorage.setItem('garmin-overview-panels',JSON.stringify(OPEN));}catch(e){}showPanels();return false;}
+            showPanels();
+            (function(){if(location.hash.length<2){try{localStorage.setItem('garmin-overview-filter','');}catch(e){}filterRows();return;}
               var p=new URLSearchParams(location.hash.slice(1));
               KEYS.forEach(function(k){F[k].value=p.get(k)||'';});
               // An older link may name a single Garmin type that is now part of a group.
@@ -3508,6 +3710,21 @@ public class DescribeGarminFile {
               var a=Array.prototype.find.call(document.querySelectorAll('tbody tr td:first-child a'),function(x){return x.textContent===at;});
               if(a){var tr=a.closest('tr');tr.scrollIntoView({block:'center'});tr.classList.add('back-here');
                 setTimeout(function(){tr.classList.remove('back-here');},2500);}})();
+            """;
+
+    /** Next to the overview; lists every report so a report can link to the previous and next day. */
+    static final String DAYS_FILE = "days.js";
+
+    /** Previous/next day links in a report's top bar, from days.js; the ← and → keys follow them too. */
+    private static final String DAY_STEP_JS = """
+            (function(){var d=window.GARMIN_DAYS;if(!d)return;
+              var i=d.findIndex(function(h){return h.slice(-22,-12)===THIS_DAY;});if(i<0)return;
+              function set(id,j,label){var a=document.getElementById(id);if(j<0||j>=d.length)return null;
+                a.href=DAY_BASE+d[j];a.textContent=label(d[j].slice(-22,-12));a.hidden=false;return a;}
+              var p=set('prevDay',i-1,function(x){return '‹ '+x;}),n=set('nextDay',i+1,function(x){return x+' ›';});
+              document.addEventListener('keydown',function(e){
+                if(e.altKey||e.ctrlKey||e.metaKey||e.shiftKey||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName))return;
+                if(e.key==='ArrowLeft'&&p)location.href=p.href;else if(e.key==='ArrowRight'&&n)location.href=n.href;});})();
             """;
 
     private static final String JS = """
