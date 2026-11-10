@@ -79,6 +79,10 @@ public class DescribeGarminFile {
     }
 
     /** "Bart", "Peter": for page titles. */
+    static String accountLabelOf(String name) {
+        return accountLabel(name);
+    }
+
     private static String accountLabel(String name) {
         return Character.toUpperCase(name.charAt(0)) + name.substring(1);
     }
@@ -164,6 +168,8 @@ public class DescribeGarminFile {
         }
         Path overview = Overview.write();
         System.out.println("Overview updated: " + overview.toAbsolutePath());
+        // Only new or changed GPX files are read, so this takes a second after the first run.
+        Heatmap.write();
         if (open) {
             Path target = single ? lastReport : overview;
             new ProcessBuilder("open", target.toString()).inheritIO().start().waitFor();
@@ -1919,7 +1925,8 @@ public class DescribeGarminFile {
             // The chart, calendar and records are folded away by default; these buttons open them.
             h.append("<div class=\"ranges panels\"><a href=\"#\" data-panel=\"trend\" onclick=\"return togglePanel('trend')\">📊 Chart</a>")
                     .append("<a href=\"#\" data-panel=\"calendar\" onclick=\"return togglePanel('calendar')\">📅 Calendar</a>")
-                    .append("<a href=\"#\" data-panel=\"records\" onclick=\"return togglePanel('records')\">🏆 Records</a></div>");
+                    .append("<a href=\"#\" data-panel=\"records\" onclick=\"return togglePanel('records')\">🏆 Records</a>")
+                    .append("<a href=\"").append(Heatmap.PAGE_FILE).append("\">🗺️ Heatmap</a></div>");
             h.append("<section class=\"card panel folded\" id=\"trend\" hidden><div class=\"trend-head\"><h2 id=\"trendTitle\">Per month</h2>")
                     .append("<span class=\"ranges\" id=\"trendMetric\"><a href=\"#\" data-m=\"dist\" onclick=\"return setMetric('dist')\">Distance</a>")
                     .append("<a href=\"#\" data-m=\"dur\" onclick=\"return setMetric('dur')\">Time</a>")
@@ -2069,7 +2076,7 @@ public class DescribeGarminFile {
          * Activity types left out of the overview (tiles, totals and rows); the day report still shows them.
          * overland: a single 5-second recording without distance (2025-02-27), started by accident.
          */
-        private static final Set<String> HIDDEN_SPORTS = Set.of("overland");
+        static final Set<String> HIDDEN_SPORTS = Set.of("overland");
 
         /** The day's activities as the overview counts them. */
         private static List<Object> shown(Map<String, Object> summary) {
@@ -3291,7 +3298,7 @@ public class DescribeGarminFile {
         return s.isEmpty() ? key : Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
-    private static String sportIcon(String sport) {
+    static String sportIcon(String sport) {
         String s = sport.toLowerCase(Locale.ROOT);
         if (s.contains("swim")) return "🏊";
         if (s.contains("cycl") || s.contains("bik") || s.contains("ride")) return "🚴";
@@ -3427,7 +3434,7 @@ public class DescribeGarminFile {
         return "<p class=\"from\">" + chip(src) + " from <code>" + esc(file) + "</code> · " + esc(what) + "</p>";
     }
 
-    private static final String CSS = """
+    static final String CSS = """
             :root{--bg:#f6f7f9;--card:#fff;--fg:#1d2329;--muted:#6b7682;--line:#e3e7ec;--accent:#2563eb;
               --c-hr:#e5484d;--c-speed:#2563eb;--c-alt:#16a34a;--c-cad:#d97706;--c-pow:#9333ea;--c-temp:#0891b2;--c-resp:#0d9488;
               --c-stress:#ea580c;--c-bb:#2563eb;--c-deep:#1e3a8a;--c-light:#60a5fa;--c-rem:#c084fc;--c-awake:#f472b6;
