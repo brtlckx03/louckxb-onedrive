@@ -2,6 +2,11 @@ package net.lckx.garmin;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
+import java.io.ByteArrayInputStream;
 import java.io.Console;
 import java.io.IOException;
 import java.net.CookieHandler;
@@ -16,7 +21,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.KeyStore;
 import java.security.SecureRandom;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -24,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Scanner;
 import java.util.TreeMap;
@@ -67,11 +77,26 @@ public class DownloadGarminFiles {
                     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
     private static final String APP_UA = "com.garmin.android.apps.connectmobile";
 
-    private static final Path TOKEN_FILE =
+    // Per account (--account NAME): the main account uses ~/.garmin-token and ~/.garmin-credentials,
+    // another one ~/.garmin-token-NAME and ~/.garmin-credentials-NAME, so the logins never mix.
+    private static Path TOKEN_FILE =
             Path.of(System.getProperty("user.home"), ".garmin-token");
-    private static final Path CREDENTIALS_FILE =
+    private static Path CREDENTIALS_FILE =
             Path.of(System.getProperty("user.home"), ".garmin-credentials");
-    private static final Path DOWNLOAD_DIR = Path.of("src/main/resources/garmin");
+    private static Path DOWNLOAD_DIR = DescribeGarminFile.dataDir(DescribeGarminFile.MAIN_ACCOUNT);
+    /** Suffix for the env vars of another account: GARMIN_EMAIL_PETER / GARMIN_PASSWORD_PETER. */
+    private static String ENV_SUFFIX = "";
+
+    private static void useAccount(String name) {
+        DescribeGarminFile.useAccount(name);
+        String a = DescribeGarminFile.account();
+        DOWNLOAD_DIR = DescribeGarminFile.dataDir(a);
+        if (a.equals(DescribeGarminFile.MAIN_ACCOUNT)) return;
+        String home = System.getProperty("user.home");
+        TOKEN_FILE = Path.of(home, ".garmin-token-" + a);
+        CREDENTIALS_FILE = Path.of(home, ".garmin-credentials-" + a);
+        ENV_SUFFIX = "_" + a.toUpperCase(Locale.ROOT).replace('-', '_');
+    }
     private static final int WELLNESS_SCHEMA_VERSION = 3;
 
     private static final SecureRandom RNG = new SecureRandom();
@@ -82,11 +107,60 @@ public class DownloadGarminFiles {
         cm.setCookiePolicy(CookiePolicy.ACCEPT_ALL);
         CookieHandler.setDefault(cm);
         HTTP = HttpClient.newBuilder()
+                .sslContext(sslContext())
                 .cookieHandler(cm)
                 .version(HttpClient.Version.HTTP_1_1)
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .connectTimeout(Duration.ofSeconds(30))
                 .build();
+    }
+
+    /**
+     * Java's own CA list plus the CA certificates in the macOS System keychain. A company proxy that inspects HTTPS
+     * (here Zscaler) re-signs Garmin's certificates with its own root, which IT installs in the System keychain but
+     * Java does not read; and every JDK update resets Java's list (cacerts), so importing it there does not last.
+     */
+    private static SSLContext sslContext() {
+        try {
+            TrustManagerFactory jdk = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            jdk.init((KeyStore) null);
+            KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+            ks.load(null, null);
+            int n = 0;
+            for (TrustManager tm : jdk.getTrustManagers())
+                if (tm instanceof X509TrustManager x) for (X509Certificate c : x.getAcceptedIssuers()) ks.setCertificateEntry("jdk-" + n++, c);
+            List<X509Certificate> extra = macSystemKeychainCAs();
+            if (extra.isEmpty()) return SSLContext.getDefault();
+            for (int i = 0; i < extra.size(); i++) ks.setCertificateEntry("keychain-" + i, extra.get(i));
+            TrustManagerFactory both = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            both.init(ks);
+            SSLContext ctx = SSLContext.getInstance("TLS");
+            ctx.init(null, both.getTrustManagers(), null);
+            return ctx;
+        } catch (Exception e) {
+            System.err.println("Could not add the macOS keychain certificates; using Java's defaults: " + e.getMessage());
+            try {
+                return SSLContext.getDefault();
+            } catch (Exception e2) {
+                throw new IllegalStateException(e2);
+            }
+        }
+    }
+
+    /** CA certificates (not end-entity ones) in /Library/Keychains/System.keychain; empty when not on macOS. */
+    private static List<X509Certificate> macSystemKeychainCAs() throws Exception {
+        if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac")) return List.of();
+        Path keychain = Path.of("/Library/Keychains/System.keychain");
+        if (!Files.exists(keychain)) return List.of();
+        Process p = new ProcessBuilder("/usr/bin/security", "find-certificate", "-a", "-p", keychain.toString())
+                .redirectError(ProcessBuilder.Redirect.DISCARD).start();
+        byte[] pem = p.getInputStream().readAllBytes();
+        p.waitFor();
+        List<X509Certificate> out = new ArrayList<>();
+        if (pem.length == 0) return out;
+        for (Certificate c : CertificateFactory.getInstance("X.509").generateCertificates(new ByteArrayInputStream(pem)))
+            if (c instanceof X509Certificate x && x.getBasicConstraints() >= 0) out.add(x);
+        return out;
     }
 
     /** Garmin sometimes accepts a request and never answers; without a timeout the run hangs forever. */
@@ -117,6 +191,7 @@ public class DownloadGarminFiles {
                 case "--since" -> since = LocalDate.parse(args[++i]);
                 case "--until" -> until = LocalDate.parse(args[++i]);
                 case "--list-only" -> listOnly = true;
+                case "--account" -> useAccount(args[++i]);
                 default -> {
                     System.err.println("Unknown argument: " + args[i]);
                     printUsageAndExit();
@@ -297,7 +372,7 @@ public class DownloadGarminFiles {
     }
 
     private static void printUsageAndExit() {
-        System.err.println("Usage: DownloadGarminFiles --since YYYY-MM-DD [--until YYYY-MM-DD]");
+        System.err.println("Usage: DownloadGarminFiles [--account NAME] --since YYYY-MM-DD [--until YYYY-MM-DD]");
         System.exit(1);
     }
 
@@ -313,10 +388,10 @@ public class DownloadGarminFiles {
     private static String CREDENTIAL_SOURCE = "?";
 
     private static String[] readCredentials() {
-        String envEmail = System.getenv("GARMIN_EMAIL");
-        String envPassword = System.getenv("GARMIN_PASSWORD");
+        String envEmail = System.getenv("GARMIN_EMAIL" + ENV_SUFFIX);
+        String envPassword = System.getenv("GARMIN_PASSWORD" + ENV_SUFFIX);
         if (envEmail != null && !envEmail.isBlank() && envPassword != null && !envPassword.isBlank()) {
-            CREDENTIAL_SOURCE = "env vars GARMIN_EMAIL/GARMIN_PASSWORD";
+            CREDENTIAL_SOURCE = "env vars GARMIN_EMAIL" + ENV_SUFFIX + "/GARMIN_PASSWORD" + ENV_SUFFIX;
             return new String[]{envEmail.trim(), envPassword};
         }
         String[] fromFile = readCredentialsFromFile();
@@ -330,14 +405,14 @@ public class DownloadGarminFiles {
                     No secure input available.
                     Either:
                       • Run this from a real terminal (Terminal.app / iTerm), OR
-                      • Set the GARMIN_EMAIL and GARMIN_PASSWORD environment variables, OR
+                      • Set the GARMIN_EMAIL%2$s and GARMIN_PASSWORD%2$s environment variables, OR
                       • Create %s with "email=..." and "password=..." lines (chmod 600).
                     In IntelliJ: Run > Edit Configurations > Environment variables.
-                    """.formatted(CREDENTIALS_FILE));
+                    """.formatted(CREDENTIALS_FILE, ENV_SUFFIX));
             System.exit(1);
         }
         CREDENTIAL_SOURCE = "interactive console";
-        String email = console.readLine("Garmin email: ").trim();
+        String email = console.readLine("Garmin email" + (ENV_SUFFIX.isEmpty() ? "" : " for account " + DescribeGarminFile.account()) + ": ").trim();
         char[] pw = console.readPassword("Garmin password: ");
         return new String[]{email, new String(pw)};
     }

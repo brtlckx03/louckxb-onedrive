@@ -53,7 +53,40 @@ import java.util.stream.Stream;
  */
 public class DescribeGarminFile {
 
-    private static final Path DATA_DIR = Path.of("src/main/resources/garmin");
+    /**
+     * The Garmin account whose data is in {@code src/main/resources/garmin}; any other account gets its own folder next to
+     * it ({@code garmin-<name>}), with its own reports and overview. Chosen with {@code --account <name>}.
+     */
+    static final String MAIN_ACCOUNT = "bart";
+    private static final Path RESOURCES = Path.of("src/main/resources");
+    private static String account = MAIN_ACCOUNT;
+    private static Path DATA_DIR = dataDir(MAIN_ACCOUNT);
+
+    static Path dataDir(String name) {
+        return RESOURCES.resolve(name.equals(MAIN_ACCOUNT) ? "garmin" : "garmin-" + name);
+    }
+
+    /** Switches every path (reports, overview, corrections) to another account's folder. */
+    static void useAccount(String name) {
+        name = name.toLowerCase(Locale.ROOT);
+        if (!name.matches("[a-z0-9_-]+")) throw new IllegalArgumentException("Account name may only use a-z, 0-9, - and _: " + name);
+        account = name;
+        DATA_DIR = dataDir(name);
+    }
+
+    static String account() {
+        return account;
+    }
+
+    /** "Bart", "Peter": for page titles. */
+    private static String accountLabel(String name) {
+        return Character.toUpperCase(name.charAt(0)) + name.substring(1);
+    }
+
+    /** localStorage key for the overview filter, per account (both overviews are served from the same origin). */
+    private static String filterKey() {
+        return "garmin-overview-filter" + (account.equals(MAIN_ACCOUNT) ? "" : "-" + account);
+    }
     private static final String OVERVIEW_FILE = "index.html";
     private static final String SUMMARY_START = "<script type=\"application/json\" id=\"garmin-summary\">";
     private static final Pattern ACTIVITY_FILE =
@@ -74,6 +107,7 @@ public class DescribeGarminFile {
                 case "--out" -> out = Path.of(args[++i]);
                 case "--open" -> open = true;
                 case "--all" -> all = true;
+                case "--account" -> useAccount(args[++i]);
                 case "-h", "--help" -> {
                     printUsage();
                     return;
@@ -143,7 +177,8 @@ public class DescribeGarminFile {
                        DescribeGarminFile YYYY-MM-DD YYYY-MM-DD        every day in the range
                        DescribeGarminFile --since YYYY-MM-DD [--until YYYY-MM-DD]
                        DescribeGarminFile --all                        every day with data (after a change to the reports)
-                Options: --open  open the report (one day) or the overview (range) when done""");
+                Options: --open  open the report (one day) or the overview (range) when done
+                         --account NAME  another Garmin account's data (src/main/resources/garmin-NAME); default %s""".formatted(MAIN_ACCOUNT));
     }
 
     /**
@@ -458,7 +493,7 @@ public class DescribeGarminFile {
             String base = overviewHref.replace('\\', '/');
             base = base.contains("/") ? base.substring(0, base.lastIndexOf('/') + 1) : "";
             h.append("</main><div id=\"tip\"></div><script src=\"").append(esc(base)).append(DAYS_FILE).append("\"></script>")
-                    .append("<script>var DAY_BASE=").append(jsStr(base)).append(",THIS_DAY=\"").append(day.date).append("\";")
+                    .append("<script>var FILTER_KEY=").append(jsStr(filterKey())).append(",DAY_BASE=").append(jsStr(base)).append(",THIS_DAY=\"").append(day.date).append("\";")
                     .append(DAY_STEP_JS).append(JS).append("</script></body></html>");
             return h.toString();
         }
@@ -467,7 +502,7 @@ public class DescribeGarminFile {
 
         void header() {
             String weekday = day.date.getDayOfWeek().getDisplayName(TextStyle.FULL, Locale.ENGLISH);
-            h.append("<header><div class=\"eyebrow\">Garmin day report</div><h1>")
+            h.append("<header><div class=\"eyebrow\">Garmin day report · ").append(esc(accountLabel(account))).append("</div><h1>")
                     .append(weekday).append(" ").append(day.date.getDayOfMonth()).append(" ")
                     .append(day.date.getMonth().getDisplayName(TextStyle.FULL, Locale.ENGLISH)).append(" ")
                     .append(day.date.getYear()).append("</h1>");
@@ -1843,8 +1878,9 @@ public class DescribeGarminFile {
             StringBuilder h = new StringBuilder();
             h.append("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">")
                     .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
-                    .append("<title>Garmin reports</title><style>").append(CSS).append("</style></head><body><main>")
-                    .append("<header><div class=\"eyebrow\">Garmin day reports</div><h1>Overview</h1><p class=\"sub\">")
+                    .append("<title>Garmin reports · ").append(esc(accountLabel(account))).append("</title><style>").append(CSS).append("</style></head><body><main>")
+                    .append("<header><div class=\"eyebrow\">Garmin day reports · ").append(esc(accountLabel(account))).append("</div>")
+                    .append(accountLinks()).append("<h1>Overview</h1><p class=\"sub\">")
                     .append(entries.size()).append(" days · updated ").append(DT.format(LocalDateTime.now()))
                     .append(" · regenerated every time DescribeGarminFile writes a report</p></header>");
 
@@ -1911,10 +1947,30 @@ public class DescribeGarminFile {
             }
             h.append("<footer>Click a column header to sort. A distance marked ≈ is a corrected pool-swim distance ")
                     .append("(recounted from the stroke count; hover for Garmin's value, details in the day report). Reports live in <code>").append(esc(DATA_DIR.toString()))
-                    .append("</code>.</footer></main><div id=\"tip\"></div><script>").append(JS)
+                    .append("</code>.</footer></main><div id=\"tip\"></div><script>var FILTER_KEY=").append(jsStr(filterKey())).append(";").append(JS)
                     .append(OVERVIEW_JS)
                     .append("</script></body></html>");
             return h.toString();
+        }
+
+        /** Links to the other accounts' overviews (folders garmin and garmin-* next to this one), when there are any. */
+        private static String accountLinks() {
+            List<String> names = new ArrayList<>();
+            try (Stream<Path> s = Files.list(RESOURCES)) {
+                s.map(p -> p.getFileName().toString()).filter(n -> n.equals("garmin") || n.matches("garmin-[a-z0-9_-]+"))
+                        .filter(n -> Files.exists(RESOURCES.resolve(n).resolve(OVERVIEW_FILE)) || RESOURCES.resolve(n).equals(DATA_DIR))
+                        .sorted().forEach(n -> names.add(n.equals("garmin") ? MAIN_ACCOUNT : n.substring(7)));
+            } catch (IOException e) {
+                return "";
+            }
+            if (names.size() < 2) return "";
+            StringBuilder h = new StringBuilder("<div class=\"ranges accounts\">");
+            for (String n : names) {
+                String href = "../" + dataDir(n).getFileName() + "/" + OVERVIEW_FILE;
+                h.append("<a href=\"").append(esc(href)).append("\"").append(n.equals(account) ? " class=\"on\"" : "").append(">")
+                        .append(esc(accountLabel(n))).append("</a>");
+            }
+            return h.append("</div>").toString();
         }
 
         private static void row(StringBuilder h, Entry e) {
@@ -1940,6 +1996,7 @@ public class DescribeGarminFile {
                         .append(esc(sportGroup(str(at(o, "sport"))))).append("\" data-dist=\"")
                         .append(d == null ? 0 : Math.round(d)).append("\" data-kmh=\"").append(Math.round(kmh * 100) / 100.0)
                         .append("\" data-dur=\"").append(dur == null ? 0 : Math.round(dur))
+                        .append(NOT_A_RECORD.contains(e.date + " " + str(at(o, "start"))) ? "\" data-norec=\"1" : "")
                         .append("\" title=\"").append(esc(sportName(str(at(o, "sport")))))
                         .append(kmh > 0 ? " · " + fmtNum(kmh, 1) + " km/h" : "").append("\">")
                         .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name")))).append("</a>");
@@ -1985,6 +2042,7 @@ public class DescribeGarminFile {
                 Map.entry("virtual_ride", "indoor_cycling"),
                 Map.entry("casual_walking", "walking"),
                 Map.entry("hiking", "walking"),
+                Map.entry("steps", "walking"),
                 Map.entry("rowing_v2", "rowing_and_paddling"),
                 Map.entry("kayaking_v2", "rowing_and_paddling"),
                 Map.entry("paddling_v2", "rowing_and_paddling"),
@@ -1992,12 +2050,20 @@ public class DescribeGarminFile {
                 Map.entry("track_running", "running"),
                 Map.entry("trail_running", "running"),
                 Map.entry("obstacle_run", "running"),
+                Map.entry("street_running", "running"),
                 Map.entry("badminton", "racket_sports"),
                 Map.entry("table_tennis", "racket_sports"),
                 Map.entry("multi_sport", "others"),
                 Map.entry("breathwork", "others"),
                 Map.entry("lap_swimming", "swimming"),
                 Map.entry("open_water_swimming", "swimming"));
+
+        /**
+         * Activities ("date start") left out of the records only, because their numbers are not real; they still count in
+         * the totals. 2012-12-13 20:33: a 53 km "run" of 8:53, not an actual run (confirmed by the user);
+         * 2012-12-17 13:02: the same pattern (46 km in 8:48, also just named "running").
+         */
+        private static final Set<String> NOT_A_RECORD = Set.of("2012-12-13 20:33", "2012-12-17 13:02");
 
         /**
          * Activity types left out of the overview (tiles, totals and rows); the day report still shows them.
@@ -3405,6 +3471,7 @@ public class DescribeGarminFile {
             .trend-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}
             #trendChart svg{width:100%;height:auto;display:block}#trendChart rect.hit:hover{fill:color-mix(in srgb,var(--fg) 6%,transparent)}
             #tip b{font-weight:650}
+            .accounts{float:right;margin-top:-2px}
             section.panel.folded{display:none}.panels{margin:4px 0 8px}
             #calChart svg{width:100%;height:auto;display:block;max-width:900px}#calChart rect.day:hover{stroke:var(--fg);stroke-width:1.5}
             #calendar .ranges a{min-width:34px;text-align:center}
@@ -3553,7 +3620,7 @@ public class DescribeGarminFile {
               if(q)p.set('q',F.q.value);
               var h=p.toString();history.replaceState(null,'',h?'#'+h:location.pathname+location.search);
               // Remembered so a day report's "← Overview" link can come back to the same filtered view.
-              try{localStorage.setItem('garmin-overview-filter',h);}catch(e){}}
+              try{localStorage.setItem(window.FILTER_KEY||'garmin-overview-filter',h);}catch(e){}}
             // ---- records, from the activities the filters leave
             // Speeds above these are GPS glitches (or a ride saved as a run), not records.
             var MAX_KMH={running:20,walking:12,swimming:8,cycling:65,indoor_cycling:70,rowing_and_paddling:20};
@@ -3576,7 +3643,7 @@ public class DescribeGarminFile {
               var box=document.getElementById('records'),tiles=document.getElementById('recordTiles');tiles.innerHTML='';
               RECORDS.forEach(function(rec){var best=null;
                 list.forEach(function(x){
-                  if(rec.g&&x.group!==rec.g)return;if(rec.min&&x.dist<rec.min)return;
+                  if(x.a.dataset.norec)return;if(rec.g&&x.group!==rec.g)return;if(rec.min&&x.dist<rec.min)return;
                   if(rec.by==='kmh'&&(!(x.kmh>0)||x.kmh>(MAX_KMH[x.group]||999)))return;
                   var v=x[rec.by];if(!(v>0))return;if(!best||v>best[rec.by])best=x;});
                 if(!best)return;
@@ -3698,7 +3765,7 @@ public class DescribeGarminFile {
               b.classList.toggle('on',on);document.getElementById(id).classList.toggle('folded',!on);});}
             function togglePanel(id){OPEN[id]=!OPEN[id];try{localStorage.setItem('garmin-overview-panels',JSON.stringify(OPEN));}catch(e){}showPanels();return false;}
             showPanels();
-            (function(){if(location.hash.length<2){try{localStorage.setItem('garmin-overview-filter','');}catch(e){}filterRows();return;}
+            (function(){if(location.hash.length<2){try{localStorage.setItem(window.FILTER_KEY||'garmin-overview-filter','');}catch(e){}filterRows();return;}
               var p=new URLSearchParams(location.hash.slice(1));
               KEYS.forEach(function(k){F[k].value=p.get(k)||'';});
               // An older link may name a single Garmin type that is now part of a group.
@@ -3748,7 +3815,7 @@ public class DescribeGarminFile {
               // Click a column header to sort; click again to reverse. Durations (m:ss, h:mm:ss) sort as seconds,
               // numbers ignore units and thousands spaces, empty cells always go last.
               // Back to the overview with the filter it last had, scrolled to this day.
-              window.toOverview=function(link){var f='';try{f=localStorage.getItem('garmin-overview-filter')||'';}catch(e){}
+              window.toOverview=function(link){var f='';try{f=localStorage.getItem(window.FILTER_KEY||'garmin-overview-filter')||'';}catch(e){}
                 var p=new URLSearchParams(f);if(link.dataset.day)p.set('at',link.dataset.day);
                 link.href=link.href.split('#')[0]+'#'+p.toString();return true;};
               window.toggleSub=function(tr){var s=tr.nextElementSibling;if(!s||!s.classList.contains('sub'))return;
