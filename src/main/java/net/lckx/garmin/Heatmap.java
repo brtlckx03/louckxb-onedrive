@@ -35,7 +35,7 @@ public final class Heatmap {
     private static final String DATA_FILE = "heatmap-data.js";
     private static final String CACHE_FILE = "heatmap-cache.tsv";
     /** Bump when the simplification changes, so every track is read again. */
-    private static final String CACHE_VERSION = "v1";
+    private static final String CACHE_VERSION = "v2";
 
     private static final Pattern GPX_FILE = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})_(\\d+)_.*\\.gpx");
     private static final Pattern TRKPT = Pattern.compile("<trkpt\\s+lat=\"([-0-9.eE]+)\"\\s+lon=\"([-0-9.eE]+)\"");
@@ -121,6 +121,7 @@ public final class Heatmap {
                 System.err.println("Heatmap: could not read " + json + ": " + e.getMessage());
             }
         }
+        sport = SportCorrection.sport(sport, km * 1000, secs);
         String xml = Files.readString(gpx);
         if (sport.isEmpty()) {
             int i = xml.indexOf("<type>"), k = xml.indexOf("</type>");
@@ -282,9 +283,15 @@ public final class Heatmap {
 
     // ---- output --------------------------------------------------------------------------------------------
 
-    /** {@code window.HEATMAP=[[date, time, sport, group, name, km, seconds, [polyline…]], …]}, oldest first. */
+    /** {@code window.HEATMAP=[[date, time, sport, group, name, km, seconds, [polyline…], garmin id], …]}, oldest first. */
     private static Set<String> writeData(Path f, TreeMap<String, Track> tracks) throws IOException {
         Set<String> groups = new TreeSet<>();
+        // The Garmin activity id is in the file name; the day report has an anchor #a<id> on that activity.
+        Map<Track, String> ids = new HashMap<>();
+        tracks.forEach((key, t) -> {
+            Matcher m = GPX_FILE.matcher(key.substring(key.lastIndexOf('/') + 1));
+            ids.put(t, m.matches() ? m.group(2) : "");
+        });
         List<Track> list = tracks.values().stream()
                 .filter(t -> !t.lines.isEmpty() && !DescribeGarminFile.Overview.HIDDEN_SPORTS.contains(t.sport))
                 .sorted((a, b) -> (a.date + a.time).compareTo(b.date + b.time)).toList();
@@ -294,7 +301,7 @@ public final class Heatmap {
                     .append(jsStr(DescribeGarminFile.Overview.sportGroup(t.sport))).append(',').append(jsStr(t.name)).append(',')
                     .append(DescribeGarminFile.trimNum(Math.round(t.km * 100) / 100.0)).append(',').append(Math.round(t.secs)).append(",[");
             for (int i = 0; i < t.lines.size(); i++) b.append(i == 0 ? "" : ",").append(jsStr(t.lines.get(i)));
-            b.append("]],\n");
+            b.append("],").append(jsStr(ids.get(t))).append("],\n");
         }
         replace(f, b.append("];\n").toString());
         for (Track t : list) groups.add(DescribeGarminFile.Overview.sportGroup(t.sport));
@@ -317,7 +324,7 @@ public final class Heatmap {
         }
         names.append('}');
         return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-                + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" + DescribeGarminFile.favicon("#ea580c")
                 + "<title>Heatmap · " + esc(label) + "</title>"
                 + "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">"
                 + "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>"
@@ -335,7 +342,7 @@ public final class Heatmap {
                 + "<span id=\"filterStatus\"></span></div><div class=\"legend\" id=\"countLegend\" hidden></div></header>"
                 + "<div id=\"map\"></div>"
                 + "<p class=\"hm-foot\">Updated " + DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").format(LocalDateTime.now())
-                + " from the GPX files · click the map to list the activities that passed there · "
+                + " from the GPX files · click the map to list the activities that passed there; zoomed out, a dot per place (click to zoom in) · "
                 + "activities without GPS (indoor, pool swims) are not on the map.</p>"
                 + "<script src=\"" + DATA_FILE + "\"></script><script>var NAMES=" + names + ",STORE="
                 + jsStr("garmin-heatmap" + (DescribeGarminFile.account().equals(DescribeGarminFile.MAIN_ACCOUNT) ? "" : "-" + DescribeGarminFile.account()))
@@ -359,6 +366,9 @@ public final class Heatmap {
             #countLegend i{display:inline-block;width:22px;border-radius:2px;vertical-align:middle;margin-right:6px}
             .hm-foot{color:var(--muted);font-size:12.5px;margin:6px 16px 12px}
             .leaflet-container{font:inherit}
+            .hm-ctl a{font-size:16px;line-height:30px}.hm-ctl a[hidden]{display:none}
+            #hmBack,#hmFwd{font-weight:700;color:#2563eb}#hmSel.on{background:#dbe7fd;color:#2563eb}
+            .hm-box{position:absolute;z-index:800;border:2px solid #2563eb;background:rgba(37,99,235,.12);pointer-events:none}
             #map .leaflet-tile-pane{filter:grayscale(1) contrast(.9) brightness(1.04)}
             #map.dark .leaflet-tile-pane{filter:grayscale(1) invert(1) brightness(.42) contrast(1.25)}
             .hm-pop{max-height:260px;overflow:auto;min-width:230px}
@@ -392,7 +402,7 @@ public final class Heatmap {
               return {xy:xy,b:[x0,y0,x1,y1]};
             }
             (window.HEATMAP||[]).forEach(function(r){
-              ACTS.push({date:r[0],time:r[1],sport:r[2],group:r[3],name:r[4],km:r[5],secs:r[6],lines:r[7].map(decode)});
+              ACTS.push({date:r[0],time:r[1],sport:r[2],group:r[3],name:r[4],km:r[5],secs:r[6],lines:r[7].map(decode),id:r[8]});
             });
             function fmtDur(s){var h=Math.floor(s/3600),m=Math.floor(s%3600/60);if(h>=100)return fmtInt(s/3600)+' h';return h?h+':'+String(m).padStart(2,'0')+' h':m+' min'}
             function fmtInt(v){return Math.round(v).toLocaleString('en-US').replace(/,/g,' ')}
@@ -498,7 +508,7 @@ public final class Heatmap {
               var vx0=o.x/scale,vy0=o.y/scale,vx1=(o.x+sz.x)/scale,vy1=(o.y+sz.y)/scale;
               var a=alpha.value/40,dark=base=='dark';
               ctx.setTransform(dpr,0,0,dpr,0,0);
-              if(ST.mode=='count'){paintCounts(z,scale,o,vx0,vy0,vx1,vy1,dark);return}
+              if(ST.mode=='count'){paintCounts(z,scale,o,vx0,vy0,vx1,vy1,dark);paintPlaces(z,scale,o,sz);return}
               ctx.globalCompositeOperation=dark?'lighter':'source-over';
               // Overlapping lines add up: few passes stay red, often-used streets go orange, yellow, then white.
               ctx.strokeStyle=dark?'rgba(255,72,24,'+a+')':'rgba(205,30,20,'+Math.min(1,a*.35)+')';
@@ -515,7 +525,93 @@ public final class Heatmap {
                 });
                 if(any)ctx.stroke();
               });
+              paintPlaces(z,scale,o,sz);
             }
+            // Zoomed out, a short trip far away is only a few pixels of line; a numbered dot per place shows where
+            // in the world there are activities. Clicking a dot zooms in on it.
+            var PLACES=[],PLACE_ZOOM=9;
+            function placesAt(scale,o,sz){
+              var cells={},out=[],G=46;
+              ACTS.forEach(function(act){if(!shown(act)||!act.lines.length)return;
+                var xy=act.lines[0].xy,x=xy[0]*scale-o.x,y=xy[1]*scale-o.y;
+                if(x<-G||y<-G||x>sz.x+G||y>sz.y+G)return;
+                var k=Math.floor(x/G)+','+Math.floor(y/G),c=cells[k];
+                if(!c)c=cells[k]={n:0,sx:0,sy:0,x0:1,y0:1,x1:0,y1:0},out.push(c);
+                c.n++;c.sx+=x;c.sy+=y;
+                act.lines.forEach(function(l){var b=l.b;c.x0=Math.min(c.x0,b[0]);c.y0=Math.min(c.y0,b[1]);c.x1=Math.max(c.x1,b[2]);c.y1=Math.max(c.y1,b[3])});
+              });
+              function rad(c){c.x=c.sx/c.n;c.y=c.sy/c.n;c.r=7+Math.min(11,Math.log2(c.n)*1.6)}
+              out.forEach(rad);out.sort(function(a,b){return b.n-a.n});
+              // Dots that would touch are merged into the bigger one.
+              for(var i=0;i<out.length;i++)for(var j=out.length-1;j>i;j--){var a=out[i],b=out[j];
+                if(Math.hypot(a.x-b.x,a.y-b.y)<a.r+b.r+2){a.n+=b.n;a.sx+=b.sx;a.sy+=b.sy;a.x0=Math.min(a.x0,b.x0);a.y0=Math.min(a.y0,b.y0);
+                  a.x1=Math.max(a.x1,b.x1);a.y1=Math.max(a.y1,b.y1);out.splice(j,1);rad(a);j=out.length}}
+              return out.reverse();
+            }
+            function paintPlaces(z,scale,o,sz){
+              PLACES=z<PLACE_ZOOM?placesAt(scale,o,sz):[];
+              if(!PLACES.length)return;
+              ctx.globalCompositeOperation='source-over';ctx.textAlign='center';ctx.textBaseline='middle';
+              PLACES.forEach(function(c){
+                ctx.beginPath();ctx.arc(c.x,c.y,c.r,0,2*Math.PI);
+                ctx.fillStyle='#2563eb';ctx.fill();ctx.lineWidth=2;ctx.strokeStyle='#fff';ctx.stroke();
+                ctx.fillStyle='#fff';ctx.font='600 '+(c.n>999?9:11)+'px -apple-system,BlinkMacSystemFont,sans-serif';
+                ctx.fillText(c.n>9999?Math.round(c.n/1000)+'k':String(c.n),c.x,c.y+.5);
+              });
+            }
+            function ll(x,y){return [Math.atan(Math.sinh(Math.PI*(1-2*y)))*180/Math.PI,x*360-180]}
+            // Every jump (a dot, 🌍, 🇪🇺, 🇧🇪, a selected rectangle) is a step in the browser history, so ←/→,
+            // the browser's back/forward buttons and Esc move through them.
+            var HIST=[],POS=0;
+            function view(){var c=map.getCenter();return [c.lat,c.lng,map.getZoom()]}
+            try{history.replaceState({heatmap:0},'')}catch(e){}
+            function pushView(from){HIST=HIST.slice(0,POS+1);HIST[POS]=from||view();POS++;
+              try{history.pushState({heatmap:POS},'')}catch(e){}showNav()}
+            function jump(b){pushView();map.fitBounds(b,{padding:[30,30],maxZoom:14})}
+            window.addEventListener('popstate',function(e){var st=e.state;if(!st||st.heatmap==null)return;
+              HIST[POS]=view();POS=st.heatmap;var v=HIST[POS];if(v)map.setView([v[0],v[1]],v[2]);showNav()});
+            function showNav(){document.getElementById('hmBack').hidden=POS<=0;document.getElementById('hmFwd').hidden=POS>=HIST.length-1}
+            document.addEventListener('keydown',function(e){
+              if(e.key=='Escape'&&selecting){setSelect(false);return}
+              if(e.key=='Escape'&&POS>0&&!document.querySelector('.leaflet-popup'))history.back()});
+            function showAll(){var x0=1,y0=1,x1=0,y1=0;
+              ACTS.forEach(function(a){if(!shown(a))return;a.lines.forEach(function(l){var b=l.b;
+                x0=Math.min(x0,b[0]);y0=Math.min(y0,b[1]);x1=Math.max(x1,b[2]);y1=Math.max(y1,b[3])})});
+              if(x1>=x0)jump([ll(x0,y1),ll(x1,y0)])}
+            var REGIONS={eu:[[35,-11],[61,31]],be:[[49.5,2.55],[51.5,6.4]]};
+            // Select: drag a rectangle to zoom into it (the button, or Shift+drag at any time).
+            var selecting=false,box=null,boxStart=null,noClickUntil=0;
+            function setSelect(on){selecting=on;document.getElementById('hmSel').classList.toggle('on',on);
+              map.getContainer().style.cursor=on?'crosshair':''}
+            map.boxZoom.disable();
+            map.getContainer().addEventListener('mousedown',function(e){
+              if(!(selecting||e.shiftKey)||e.button!==0||e.target.closest('.leaflet-control'))return;
+              e.preventDefault();e.stopPropagation();map.dragging.disable();
+              var r=map.getContainer().getBoundingClientRect();boxStart=[e.clientX-r.left,e.clientY-r.top];
+              box=document.createElement('div');box.className='hm-box';map.getContainer().appendChild(box);
+              function mv(ev){var x=ev.clientX-r.left,y=ev.clientY-r.top;
+                box.style.left=Math.min(x,boxStart[0])+'px';box.style.top=Math.min(y,boxStart[1])+'px';
+                box.style.width=Math.abs(x-boxStart[0])+'px';box.style.height=Math.abs(y-boxStart[1])+'px'}
+              function up(ev){document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);
+                var x=ev.clientX-r.left,y=ev.clientY-r.top;box.remove();box=null;noClickUntil=Date.now()+400;map.dragging.enable();setSelect(false);
+                if(Math.abs(x-boxStart[0])<8||Math.abs(y-boxStart[1])<8)return;
+                var a=map.containerPointToLatLng([boxStart[0],boxStart[1]]),b=map.containerPointToLatLng([x,y]);
+                pushView();map.fitBounds([a,b]);}
+              document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);
+            },true);
+            var Nav=L.Control.extend({options:{position:'topleft'},onAdd:function(){
+              var d=L.DomUtil.create('div','leaflet-bar hm-ctl');
+              d.innerHTML='<a href="#" id="hmAll" title="Show all places">🌍</a><a href="#" id="hmEu" title="Europe">🇪🇺</a>'
+                +'<a href="#" id="hmBe" title="Belgium">🇧🇪</a><a href="#" id="hmSel" title="Select an area to zoom in (or Shift+drag)">⬚</a>'
+                +'<a href="#" id="hmBack" title="Back (Esc)" hidden>←</a><a href="#" id="hmFwd" title="Forward" hidden>→</a>';
+              L.DomEvent.disableClickPropagation(d);
+              function on(id,f){d.querySelector('#'+id).onclick=function(e){e.preventDefault();f()}}
+              on('hmAll',showAll);on('hmEu',function(){jump(REGIONS.eu)});on('hmBe',function(){jump(REGIONS.be)});
+              on('hmSel',function(){setSelect(!selecting)});
+              on('hmBack',function(){history.back()});on('hmFwd',function(){history.forward()});
+              return d}});
+            new Nav().addTo(map);
+            function placeAt(p){for(var i=PLACES.length-1;i>=0;i--){var c=PLACES[i];if(Math.hypot(p.x-c.x,p.y-c.y)<=c.r+3)return c}return null}
             // Solid lines, one colour per class; the busier classes are drawn last so they stay on top.
             function paintCounts(z,scale,o,vx0,vy0,vx1,vy1,dark){
               countPasses();
@@ -539,6 +635,9 @@ public final class Heatmap {
             // Click: the activities whose track passes within a few pixels.
             map.on('click',function(e){
               var z=map.getZoom(),scale=256*Math.pow(2,z),o=map.getPixelBounds().min,p=map.latLngToContainerPoint(e.latlng);
+              if(Date.now()<noClickUntil)return;
+              var pl=placeAt(p);
+              if(pl){jump([ll(pl.x0,pl.y1),ll(pl.x1,pl.y0)]);return}
               var cx=(p.x+o.x)/scale,cy=(p.y+o.y)/scale,r=8/scale,hits=[];
               ACTS.forEach(function(act){
                 if(!shown(act))return;
@@ -549,7 +648,7 @@ public final class Heatmap {
               if(!hits.length)return;
               hits.reverse();
               var h='<div class="hm-pop"><b>'+hits.length+(hits.length==1?' activity':' activities')+' passed here</b>'+hits.slice(0,200).map(function(a){
-                return '<a href="'+href(a.date)+'">'+a.date+' '+esc(a.time)+' · '+esc(a.name||a.sport)+' <span>'+a.km.toFixed(1)+' km</span></a>'}).join('')
+                return '<a href="'+href(a.date)+(a.id?'#a'+a.id:'')+'">'+a.date+' '+esc(a.time)+' · '+esc(a.name||a.sport)+' <span>'+a.km.toFixed(1)+' km</span></a>'}).join('')
                 +(hits.length>200?'<span>… and '+(hits.length-200)+' more</span>':'')+'</div>';
               L.popup({maxWidth:360}).setLatLng(e.latlng).setContent(h).openOn(map);
             });

@@ -360,6 +360,8 @@ public class DescribeGarminFile {
         Instant start;
         ZoneId zone = ZoneId.systemDefault();
         String sport = "";
+        /** The type Garmin recorded, and why the activity counts as another sport (null when it doesn't). */
+        String garminSport = "", sportReason;
         /** Corrected pool-swim distance (its own file next to the data), or null. */
         SwimCorrection.Result correction;
 
@@ -411,6 +413,11 @@ public class DescribeGarminFile {
             if (a.sport.isEmpty() && a.fit != null && a.fit.first(18) != null) {
                 a.sport = Objects2.toStr(a.fit.first(18).display(5));
             }
+            // A run that was really a ride counts as cycling; Garmin's type is kept for the report's note.
+            a.garminSport = a.sport;
+            a.sportReason = SportCorrection.reason(a.sport, numOr(at(a.json, "summaryDTO", "distance"), 0),
+                    numOr(at(a.json, "summaryDTO", "duration"), 0));
+            if (a.sportReason != null) a.sport = SportCorrection.RIDE;
             a.correction = SwimCorrection.update(a).orElse(null);
             return a;
         }
@@ -479,7 +486,7 @@ public class DescribeGarminFile {
         String render() {
             boolean anyMap = day.activities.stream().anyMatch(a -> !track(a).isEmpty());
             h.append("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">")
-                    .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+                    .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">").append(favicon("#2563eb"))
                     .append("<title>Garmin ").append(day.date).append("</title>");
             if (anyMap) {
                 h.append("<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">")
@@ -622,7 +629,8 @@ public class DescribeGarminFile {
         void activity(Activity a, int idx) {
             Map<String, Object> s = asMap(at(a.json, "summaryDTO"));
             String jsonName = a.files.json == null ? "" : a.files.json.getFileName().toString();
-            h.append("<section class=\"card activity\" id=\"act").append(idx).append("\"><h2>")
+            // Besides #act<n> (the order on this day) a stable anchor #a<garmin id>, used by the heatmap's links.
+            h.append("<section class=\"card activity\" id=\"act").append(idx).append("\"><span class=\"anchor\" id=\"a").append(a.files.id()).append("\"></span><h2>")
                     .append(sportIcon(a.sport)).append(" ").append(esc(a.title())).append("</h2><p class=\"sub\">");
             if (a.start != null) {
                 ZonedDateTime st = a.start.atZone(a.zone);
@@ -632,6 +640,10 @@ public class DescribeGarminFile {
                 h.append(" (").append(esc(a.zone.getId())).append(") · ");
             }
             h.append(esc(humanize(a.sport))).append(" · activity id ").append(a.files.id).append("</p>");
+            if (a.sportReason != null)
+                h.append("<p class=\"note\">🔁 Garmin recorded this as <b>").append(esc(humanize(a.garminSport)))
+                        .append("</b>; counted as ").append(esc(humanize(a.sport))).append(" here: ").append(esc(a.sportReason))
+                        .append(". The downloaded files are unchanged.</p>");
 
             if (s != null) activityTiles(a, s, jsonName);
             correctionNote(a);
@@ -1883,7 +1895,7 @@ public class DescribeGarminFile {
         private static String render(List<Entry> entries) {
             StringBuilder h = new StringBuilder();
             h.append("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">")
-                    .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+                    .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">").append(favicon("#2563eb"))
                     .append("<title>Garmin reports · ").append(esc(accountLabel(account))).append("</title><style>").append(CSS).append("</style></head><body><main>")
                     .append("<header><div class=\"eyebrow\">Garmin day reports · ").append(esc(accountLabel(account))).append("</div>")
                     .append(accountLinks()).append("<h1>Overview</h1><p class=\"sub\">")
@@ -3335,6 +3347,13 @@ public class DescribeGarminFile {
     }
 
     /** A JavaScript string literal (also safe inside a <script> element). */
+    /** The pages' tab icon: a white pulse line on a rounded square (inline, so it needs no file). */
+    static String favicon(String color) {
+        String svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='15' fill='" + color + "'/>"
+                + "<path d='M9 35h11l6-15 11 27 7-19 4 7h7' fill='none' stroke='white' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/></svg>";
+        return "<link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/svg+xml," + svg.replace("#", "%23").replace("<", "%3C").replace(">", "%3E") + "\">";
+    }
+
     static String jsStr(String v) {
         return "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"").replace("<", "\\u003c") + "\"";
     }
@@ -3443,6 +3462,7 @@ public class DescribeGarminFile {
             @media (prefers-color-scheme:dark){:root{--bg:#0f1317;--card:#171c21;--fg:#e6e9ec;--muted:#8d98a3;--line:#2a3138;
               --c-deep:#3b5bdb;--c-light:#74a9f7;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300}}
             *{box-sizing:border-box}
+            section.activity,.anchor{scroll-margin-top:64px}.anchor{display:block}
             body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
             main{max-width:1100px;margin:0 auto;padding:24px 16px 60px}
             header{margin:8px 0 18px}.eyebrow{text-transform:uppercase;letter-spacing:.08em;font-size:12px;color:var(--muted);font-weight:600}
