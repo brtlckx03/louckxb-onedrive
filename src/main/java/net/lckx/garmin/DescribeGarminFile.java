@@ -102,7 +102,7 @@ public class DescribeGarminFile {
     public static void main(String[] args) throws Exception {
         LocalDate since = null, until = null;
         Path out = null;
-        boolean open = false, all = false;
+        boolean open = false, all = false, pages = false;
         List<LocalDate> positional = new ArrayList<>();
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
@@ -111,6 +111,7 @@ public class DescribeGarminFile {
                 case "--out" -> out = Path.of(args[++i]);
                 case "--open" -> open = true;
                 case "--all" -> all = true;
+                case "--pages" -> pages = true;
                 case "--account" -> useAccount(args[++i]);
                 case "-h", "--help" -> {
                     printUsage();
@@ -122,6 +123,12 @@ public class DescribeGarminFile {
         if (positional.size() > 2) {
             printUsage();
             System.exit(1);
+        }
+        if (pages) {
+            // Only the overview and the other pages, from the reports already on disk (e.g. after another account's download).
+            Overview.write();
+            writePages();
+            return;
         }
         if (since == null && !positional.isEmpty()) since = positional.getFirst();
         if (until == null && positional.size() == 2) until = positional.get(1);
@@ -168,13 +175,40 @@ public class DescribeGarminFile {
         }
         Path overview = Overview.write();
         System.out.println("Overview updated: " + overview.toAbsolutePath());
-        // Only new or changed GPX files are read, so this takes a second after the first run.
-        Heatmap.write();
+        writePages();
         if (open) {
             Path target = single ? lastReport : overview;
             new ProcessBuilder("open", target.toString()).inheritIO().start().waitFor();
         }
     }
+
+    /**
+     * Rebuilds every page built on top of the reports (heatmap first: Years in motion, Explorer and Year in review read
+     * its data). One page failing does not stop the others. Only changed files are read, so this is quick after the first run.
+     */
+    static void writePages() {
+        List<java.util.concurrent.Callable<?>> pages = List.of(Heatmap::write, YearsInMotion::write, () -> {
+            Together.write();
+            return null;
+        }, Explorer::write, Segments::write, BestEfforts::write, Records::write, Fitness::write, YearReview::write);
+        for (var page : pages) {
+            try {
+                page.call();
+            } catch (Exception e) {
+                System.err.println("Page not updated: " + e);
+            }
+        }
+    }
+
+    /** The sport tiles show only the totals; one link folds the kinds of each sport (e.g. 3167 hardlopen, 6 hindernisloop) open. */
+    private static final String SUBS_JS = """
+            (function(){var t=document.querySelector('.tiles.sports');if(!t||!t.querySelector('small.subs'))return;
+              var b=document.createElement('a');b.href='#';b.className='subtoggle';var open=false;
+              try{open=localStorage.getItem('garmin-overview-subs')==='1';}catch(e){}
+              function set(){t.classList.toggle('open',open);b.textContent=open?L('Hide the kinds ▴','Verberg de soorten ▴'):L('Show the kinds ▾','Toon de soorten ▾');}
+              b.onclick=function(){open=!open;try{localStorage.setItem('garmin-overview-subs',open?'1':'0');}catch(e){}set();return false;};
+              t.parentNode.insertBefore(b,t.nextSibling);set();})();
+            """;
 
     private static void printUsage() {
         System.err.println("""
@@ -183,6 +217,7 @@ public class DescribeGarminFile {
                        DescribeGarminFile YYYY-MM-DD YYYY-MM-DD        every day in the range
                        DescribeGarminFile --since YYYY-MM-DD [--until YYYY-MM-DD]
                        DescribeGarminFile --all                        every day with data (after a change to the reports)
+                       DescribeGarminFile --pages                      only the overview and the other pages
                 Options: --open  open the report (one day) or the overview (range) when done
                          --account NAME  another Garmin account's data (src/main/resources/garmin-NAME); default %s""".formatted(MAIN_ACCOUNT));
     }
@@ -309,8 +344,12 @@ public class DescribeGarminFile {
         Path monthDir = DATA_DIR.resolve(String.valueOf(date.getYear()))
                 .resolve(String.format("%02d", date.getMonthValue()));
         Map<String, Path[]> byBase = new TreeMap<>();
-        if (Files.isDirectory(monthDir)) {
-            try (Stream<Path> s = Files.list(monthDir)) {
+        // Activities from Garmin, plus the ones only Strava has (imported by StravaImport into strava/YYYY/MM).
+        Path stravaDir = DATA_DIR.resolve(StravaImport.FOLDER).resolve(String.valueOf(date.getYear()))
+                .resolve(String.format("%02d", date.getMonthValue()));
+        for (Path dir : List.of(monthDir, stravaDir)) {
+        if (Files.isDirectory(dir)) {
+            try (Stream<Path> s = Files.list(dir)) {
                 for (Path p : (Iterable<Path>) s::iterator) {
                     var m = ACTIVITY_FILE.matcher(p.getFileName().toString());
                     if (!m.matches() || !m.group(1).equals(date.toString())) continue;
@@ -324,6 +363,7 @@ public class DescribeGarminFile {
                     }
                 }
             }
+        }
         }
         for (var e : byBase.entrySet()) {
             var m = ACTIVITY_FILE.matcher(e.getKey() + ".json");
@@ -364,6 +404,8 @@ public class DescribeGarminFile {
         String garminSport = "", sportReason;
         /** Corrected pool-swim distance (its own file next to the data), or null. */
         SwimCorrection.Result correction;
+        /** Open-water swims: distance estimated from swim time and pool pace, since GPS loses its fix under water. */
+        OpenWaterCorrection.Result openWater;
 
         static Activity load(ActivityFiles f) {
             Activity a = new Activity();
@@ -415,10 +457,11 @@ public class DescribeGarminFile {
             }
             // A run that was really a ride counts as cycling; Garmin's type is kept for the report's note.
             a.garminSport = a.sport;
-            a.sportReason = SportCorrection.reason(a.sport, numOr(at(a.json, "summaryDTO", "distance"), 0),
-                    numOr(at(a.json, "summaryDTO", "duration"), 0));
-            if (a.sportReason != null) a.sport = SportCorrection.RIDE;
+            double sm = numOr(at(a.json, "summaryDTO", "distance"), 0), ss = numOr(at(a.json, "summaryDTO", "duration"), 0);
+            a.sportReason = SportCorrection.reason(f.id(), a.sport, sm, ss);
+            if (a.sportReason != null) a.sport = SportCorrection.sport(f.id(), a.sport, sm, ss);
             a.correction = SwimCorrection.update(a).orElse(null);
+            a.openWater = OpenWaterCorrection.correct(a);
             return a;
         }
 
@@ -459,6 +502,7 @@ public class DescribeGarminFile {
                         .append("\",\"start\":\"").append(a.start == null ? "" : HM.format(a.start.atZone(a.zone))).append('"');
                 jsonNum(j, "distance", at(s, "distance"));
                 if (a.correction != null && a.correction.differs()) jsonNum(j, "correctedDistance", a.correction.distance());
+                else if (a.openWater != null && a.openWater.differs()) jsonNum(j, "correctedDistance", a.openWater.distance());
                 jsonNum(j, "duration", at(s, "duration"));
                 jsonNum(j, "calories", at(s, "calories"));
                 jsonNum(j, "averageHR", at(s, "averageHR"));
@@ -487,40 +531,47 @@ public class DescribeGarminFile {
             boolean anyMap = day.activities.stream().anyMatch(a -> !track(a).isEmpty());
             h.append("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">")
                     .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">").append(favicon("#2563eb"))
-                    .append("<title>Garmin ").append(day.date).append("</title>");
+                    .append("<title>Garmin ").append(day.date).append("</title>").append(Site.HEAD);
             if (anyMap) {
+                // Leaflet also wants the global L, which Site.HEAD uses for translations: give that back, keep Leaflet as LEAF.
                 h.append("<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">")
-                        .append("<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>");
+                        .append("<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>")
+                        .append("<script>window.LEAF=window.L&&window.L.map?window.L.noConflict():null;</script>");
             }
             h.append("<style>").append(CSS).append("</style>").append(SUMMARY_START).append(summaryJson())
                     .append("</script></head><body><main>");
-            h.append("<a class=\"back\" href=\"").append(esc(overviewHref.replace('\\', '/'))).append("\" data-day=\"").append(day.date).append("\" onclick=\"return toOverview(this)\">← All reports</a>");
+            h.append(Site.nav("", 2));
             header();
             sources();
             nav();
             for (int i = 0; i < day.activities.size(); i++) activity(day.activities.get(i), i);
             if (day.wellness != null) wellness();
-            h.append("<footer>Generated ").append(DT.format(LocalDateTime.now()))
-                    .append(" by DescribeGarminFile from files in <code>").append(esc(DATA_DIR.toString()))
-                    .append("</code>. Hover a chart for exact values; hover a tile to see the exact field.</footer>");
+            String gen = DT.format(LocalDateTime.now()), dir = "<code>" + esc(DATA_DIR.toString()) + "</code>";
+            h.append("<footer>").append(t("Generated " + gen + " by DescribeGarminFile from files in " + dir
+                            + ". Hover a chart for exact values; hover a tile to see the exact field.",
+                    "Gemaakt op " + gen + " door DescribeGarminFile uit de bestanden in " + dir
+                            + ". Ga met de muis over een grafiek voor de exacte waarden, over een tegel voor het exacte veld.")).append("</footer>");
             String base = overviewHref.replace('\\', '/');
             base = base.contains("/") ? base.substring(0, base.lastIndexOf('/') + 1) : "";
             h.append("</main><div id=\"tip\"></div><script src=\"").append(esc(base)).append(DAYS_FILE).append("\"></script>")
                     .append("<script>var FILTER_KEY=").append(jsStr(filterKey())).append(",DAY_BASE=").append(jsStr(base)).append(",THIS_DAY=\"").append(day.date).append("\";")
                     .append(DAY_STEP_JS).append(JS).append("</script></body></html>");
-            return h.toString();
+            return localize(h.toString());
         }
 
         // ---- header + overview
 
         void header() {
             String weekday = day.date.getDayOfWeek().getDisplayName(TextStyle.FULL, Locale.ENGLISH);
-            h.append("<header><div class=\"eyebrow\">Garmin day report · ").append(esc(accountLabel(account))).append("</div><h1>")
+            String label = esc(accountLabel(account));
+            h.append("<header><div class=\"eyebrow\" data-nl=\"Garmin-dagrapport · ").append(esc(label)).append("\">Garmin day report · ").append(label)
+                    .append("</div><h1 data-nl=\"").append(weekdayNl(day.date)).append(" ").append(day.date.getDayOfMonth()).append(" ")
+                    .append(monthNl(day.date)).append(" ").append(day.date.getYear()).append("\">")
                     .append(weekday).append(" ").append(day.date.getDayOfMonth()).append(" ")
                     .append(day.date.getMonth().getDisplayName(TextStyle.FULL, Locale.ENGLISH)).append(" ")
                     .append(day.date.getYear()).append("</h1>");
             String device = deviceName();
-            if (!device.isEmpty()) h.append("<p class=\"sub\">Recorded with ").append(esc(device)).append("</p>");
+            if (!device.isEmpty()) h.append("<p class=\"sub\">").append(t("Recorded with", "Opgenomen met")).append(" ").append(esc(device)).append("</p>");
             h.append("</header>");
 
             double dist = 0, time = 0, cal = 0;
@@ -565,12 +616,14 @@ public class DescribeGarminFile {
         }
 
         void sources() {
-            h.append("<section class=\"card\"><h2>Source files</h2><p class=\"muted\">Every value in this report is tagged with the file it came from: ")
-                    .append(chip("FIT")).append(" binary recording from the watch, ")
-                    .append(chip("TCX")).append(" Training Center XML export, ")
-                    .append(chip("GPX")).append(" GPS track export, ")
-                    .append(chip("JSON")).append(" Garmin Connect activity summary, ")
-                    .append(chip("Wellness")).append(" Garmin Connect daily health snapshot.</p>")
+            h.append("<section class=\"card\"><h2>Source files</h2><p class=\"muted\">")
+                    .append(t("Every value in this report is tagged with the file it came from: " + chip("FIT") + " binary recording from the watch, "
+                                    + chip("TCX") + " Training Center XML export, " + chip("GPX") + " GPS track export, "
+                                    + chip("JSON") + " Garmin Connect activity summary, " + chip("Wellness") + " Garmin Connect daily health snapshot.",
+                            "Bij elke waarde in dit rapport staat uit welk bestand ze komt: " + chip("FIT") + " binaire opname van het horloge, "
+                                    + chip("TCX") + " Training Center XML-export, " + chip("GPX") + " GPS-trackexport, "
+                                    + chip("JSON") + " Garmin Connect-activiteitsoverzicht, " + chip("Wellness") + " dagelijkse gezondheidsmomentopname van Garmin Connect."))
+                    .append("</p>")
                     .append("<div class=\"scroll\"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Contains</th></tr></thead><tbody>");
             for (Activity a : day.activities) {
                 fileRow(a.files.fit, "FIT", a.fit == null ? "could not be read" : a.fit.summary());
@@ -606,10 +659,10 @@ public class DescribeGarminFile {
 
         void nav() {
             // Sticky bar: back to the overview, plus jumps within the page when there is more than one section.
-            h.append("<nav><a class=\"home\" href=\"").append(esc(overviewHref.replace('\\', '/'))).append("\" data-day=\"").append(day.date).append("\" onclick=\"return toOverview(this)\">← Overview</a>");
+            h.append("<nav><a class=\"home\" href=\"").append(esc(overviewHref.replace('\\', '/'))).append("\" data-day=\"").append(day.date).append("\" onclick=\"return toOverview(this)\" data-nl=\"← Overzicht\">← Overview</a>");
             // Filled in from days.js (written with the overview), so they stay right when later days are added.
-            h.append("<a class=\"day-step\" id=\"prevDay\" hidden title=\"Previous day with a report (←)\"></a>")
-                    .append("<a class=\"day-step\" id=\"nextDay\" hidden title=\"Next day with a report (→)\"></a>");
+            h.append("<a class=\"day-step\" id=\"prevDay\" hidden title=\"Previous day with a report (←)\" data-nl-title=\"Vorige dag met een rapport (←)\"></a>")
+                    .append("<a class=\"day-step\" id=\"nextDay\" hidden title=\"Next day with a report (→)\" data-nl-title=\"Volgende dag met een rapport (→)\"></a>");
             if (day.activities.size() + (day.wellness != null ? 1 : 0) < 2) {
                 h.append("</nav>");
                 return;
@@ -620,7 +673,7 @@ public class DescribeGarminFile {
                         .append(esc(a.title())).append(a.start != null ? " · " + HM.format(a.start.atZone(a.zone)) : "")
                         .append("</a>");
             }
-            if (day.wellness != null) h.append("<a href=\"#wellness\">❤ Health &amp; wellness</a>");
+            if (day.wellness != null) h.append("<a href=\"#wellness\" data-nl=\"❤ Gezondheid &amp;amp; welzijn\">❤ Health &amp; wellness</a>");
             h.append("</nav>");
         }
 
@@ -634,16 +687,26 @@ public class DescribeGarminFile {
                     .append(sportIcon(a.sport)).append(" ").append(esc(a.title())).append("</h2><p class=\"sub\">");
             if (a.start != null) {
                 ZonedDateTime st = a.start.atZone(a.zone);
-                h.append("Started ").append(HM.format(st));
                 Double el = num(at(s, "elapsedDuration"));
-                if (el != null) h.append(" – ended ").append(HM.format(st.plusSeconds(el.longValue())));
-                h.append(" (").append(esc(a.zone.getId())).append(") · ");
+                String from = HM.format(st), to = el == null ? null : HM.format(st.plusSeconds(el.longValue()));
+                h.append(t("Started " + from + (to == null ? "" : " – ended " + to), "Gestart " + from + (to == null ? "" : " – gestopt " + to)))
+                        .append(" (").append(esc(a.zone.getId())).append(") · ");
             }
-            h.append(esc(humanize(a.sport))).append(" · activity id ").append(a.files.id).append("</p>");
-            if (a.sportReason != null)
-                h.append("<p class=\"note\">🔁 Garmin recorded this as <b>").append(esc(humanize(a.garminSport)))
-                        .append("</b>; counted as ").append(esc(humanize(a.sport))).append(" here: ").append(esc(a.sportReason))
-                        .append(". The downloaded files are unchanged.</p>");
+            h.append(sportSpan(a.sport)).append(" · ").append(t("activity id", "activiteit-id")).append(" ").append(a.files.id).append("</p>");
+            if ("strava".equals(str(at(a.json, "source")))) {
+                String url = esc(str(at(a.json, "stravaUrl")));
+                h.append("<p class=\"note\">📥 ").append(t("From Strava: this activity is not in Garmin Connect. <a href=\"" + url + "\">Open it on Strava</a>.",
+                        "Uit Strava: deze activiteit staat niet in Garmin Connect. <a href=\"" + url + "\">Open ze op Strava</a>.")).append("</p>");
+            }
+            if (a.sportReason != null && SportCorrection.EXCLUDED.equals(a.sport))
+                h.append("<p class=\"note\">🚫 ").append(t("Not counted anywhere (overview, records, maps, fitness): " + esc(a.sportReason) + ". The downloaded files are unchanged.",
+                        "Nergens meegeteld (overzicht, records, kaarten, conditie): " + esc(a.sportReason) + ". De gedownloade bestanden zijn ongewijzigd.")).append("</p>");
+            else if (a.sportReason != null)
+                h.append("<p class=\"note\">🔁 ").append(t("Garmin recorded this as <b>" + esc(humanize(a.garminSport)) + "</b>; counted as "
+                                        + esc(humanize(a.sport)) + " here: " + esc(a.sportReason) + ". The downloaded files are unchanged.",
+                                "Garmin registreerde dit als <b>" + esc(sportNameNl(a.garminSport)) + "</b>; hier geteld als "
+                                        + esc(sportNameNl(a.sport)) + ": " + esc(a.sportReason) + ". De gedownloade bestanden zijn ongewijzigd."))
+                        .append("</p>");
 
             if (s != null) activityTiles(a, s, jsonName);
             correctionNote(a);
@@ -673,10 +736,17 @@ public class DescribeGarminFile {
         }
 
         void correctionNote(Activity a) {
+            OpenWaterCorrection.Result w = a.openWater;
+            if (w != null && w.differs()) {
+                h.append("<p class=\"note\"><b>").append(t("Corrected distance:", "Gecorrigeerde afstand:")).append(" ").append(fmtDist(w.distance())).append("</b> (Garmin: ")
+                        .append(fmtDist(w.watch())).append(") · ").append(esc(w.explanation())).append("</p>");
+            } else if (w != null && w.edited()) {
+                h.append("<p class=\"note\">").append(esc(w.explanation())).append("</p>");
+            }
             SwimCorrection.Result c = a.correction;
             if (c == null) return;
             long recounted = c.laps().stream().filter(SwimCorrection.Lap::recounted).count();
-            h.append("<p class=\"note\"><b>Corrected distance: ").append(fmtDist(c.distance())).append("</b> (Garmin: ")
+            h.append("<p class=\"note\"><b>").append(t("Corrected distance:", "Gecorrigeerde afstand:")).append(" ").append(fmtDist(c.distance())).append("</b> (Garmin: ")
                     .append(fmtDist(c.garminDistance())).append(") · ");
             if (c.manualDistance() != null) h.append("set by hand in <code>overrides.distance</code>");
             else if (c.referenceSource().startsWith("none"))
@@ -1211,7 +1281,7 @@ public class DescribeGarminFile {
                     wt(ds, "sleepingSeconds", "Sleeping", v -> fmtDur(v));
                 });
                 String fb = str(at(ds, "bodyBatteryDynamicFeedbackEvent", "feedbackLongType"));
-                if (!fb.isEmpty()) h.append("<p class=\"note\">Body battery feedback: ").append(esc(humanize(fb))).append("</p>");
+                if (!fb.isEmpty()) h.append("<p class=\"note\">").append(t("Body battery feedback:", "Body Battery-feedback:")).append(" ").append(esc(humanize(fb))).append("</p>");
             }
 
             sleep(w, zone);
@@ -1274,7 +1344,7 @@ public class DescribeGarminFile {
             for (var e : w.entrySet()) {
                 if (e.getValue() == null || e.getValue() instanceof List<?> l && l.isEmpty()) empty.add(humanize(e.getKey()));
             }
-            if (!empty.isEmpty()) h.append("<p class=\"muted\">No data in this snapshot for: ").append(esc(String.join(", ", empty))).append(".</p>");
+            if (!empty.isEmpty()) h.append("<p class=\"muted\">").append(t("No data in this snapshot for:", "Geen gegevens in deze momentopname voor:")).append(" ").append(esc(String.join(", ", empty))).append(".</p>");
             h.append("</section>");
         }
 
@@ -1321,7 +1391,7 @@ public class DescribeGarminFile {
                 h.append("</div>");
             }
             String insight = str(d.get("sleepScorePersonalizedInsight"));
-            if (!insight.isEmpty() && !insight.equals("NONE")) h.append("<p class=\"note\">Insight: ").append(esc(humanize(insight))).append("</p>");
+            if (!insight.isEmpty() && !insight.equals("NONE")) h.append("<p class=\"note\">").append(t("Insight:", "Inzicht:")).append(" ").append(esc(humanize(insight))).append("</p>");
             List<Object> levels = asList(at(w, "sleep", "sleepLevels"));
             if (levels != null && !levels.isEmpty()) h.append(sleepChart(levels, zone));
             Series sleepHr = new Series();
@@ -1367,7 +1437,8 @@ public class DescribeGarminFile {
                     .append(W).append(' ').append(H).append("\" role=\"img\" aria-label=\"Sleep stages\">");
             for (int i = 0; i < 4; i++) {
                 double y = T + row[i] * rh;
-                s.append("<text x=\"").append(L - 6).append("\" y=\"").append(fmt1(y + rh / 2 + 4)).append("\" class=\"ax\" text-anchor=\"end\">").append(names[i]).append("</text>");
+                s.append("<text x=\"").append(L - 6).append("\" y=\"").append(fmt1(y + rh / 2 + 4)).append("\" class=\"ax\" text-anchor=\"end\"")
+                        .append(nlAttr(names[i])).append(">").append(names[i]).append("</text>");
             }
             Map<Integer, Long> totals = new TreeMap<>();
             for (long[] g : segs) {
@@ -1389,7 +1460,7 @@ public class DescribeGarminFile {
             }
             s.append("</svg><div class=\"legend\">");
             for (int i = 3; i >= 0; i--) {
-                s.append("<span><i style=\"background:").append(colors[i]).append("\"></i>").append(names[i]).append(" ")
+                s.append("<span><i style=\"background:").append(colors[i]).append("\"></i>").append(tr(names[i])).append(" ")
                         .append(fmtDur(totals.getOrDefault(i, 0L) / 1000.0)).append("</span>");
             }
             return s.append("</div></figure>").toString();
@@ -1461,7 +1532,7 @@ public class DescribeGarminFile {
                         .append(factor(o, null, "stressHistoryFactorPercent", "stressHistoryFactorFeedback")).append("</td><td>")
                         .append(factor(o, null, "sleepHistoryFactorPercent", "sleepHistoryFactorFeedback")).append("</td></tr>");
             }
-            h.append("</tbody></table></div><p class=\"muted\">Factor cells: raw value · contribution % · Garmin rating.</p>");
+            h.append("</tbody></table></div><p class=\"muted\">").append(t("Factor cells: raw value · contribution % · Garmin rating.", "Factorcellen: ruwe waarde · bijdrage % · beoordeling van Garmin.")).append("</p>");
         }
 
         String factor(Object o, String valueKey, String pctKey, String fbKey) {
@@ -1492,7 +1563,7 @@ public class DescribeGarminFile {
             tiles(() -> {
                 for (Vo2Entry v : vo2Entries) {
                     if (v.stale) continue;
-                    tile(fmtNum(v.value, 1), "VO₂ max " + (v.sport.equals("generic") ? "running" : v.sport) + " <small>(measured this day)</small>",
+                    tile(fmtNum(v.value, 1), "VO₂ max " + (v.sport.equals("generic") ? "running" : v.sport) + " <small>(" + t("measured this day", "gemeten op deze dag") + ")</small>",
                             "vo2max." + v.sport + ".vo2MaxPreciseValue, calendarDate " + v.date, "Wellness");
                 }
                 Map<String, Object> vo2 = asMap(at(ts, "mostRecentVO2Max"));
@@ -1533,7 +1604,8 @@ public class DescribeGarminFile {
             });
             Map<String, Object> bal = firstValue(asMap(at(ts, "mostRecentTrainingLoadBalance", "metricsTrainingLoadBalanceDTOMap")));
             if (bal != null && num(bal.get("monthlyLoadAerobicLow")) != null) {
-                h.append("<p class=\"muted\">4-week load focus ").append(chip("Wellness")).append(" (bar = your load, band = Garmin target):</p><div class=\"zones\">");
+                h.append("<p class=\"muted\">").append(t("4-week load focus " + chip("Wellness") + " (bar = your load, band = Garmin target):",
+                        "Belastingsfocus over 4 weken " + chip("Wellness") + " (balk = jouw belasting, band = doel van Garmin):")).append("</p><div class=\"zones\">");
                 String[][] parts = {{"monthlyLoadAnaerobic", "Anaerobic", "#a855f7"}, {"monthlyLoadAerobicHigh", "High aerobic", "#f08a4b"},
                         {"monthlyLoadAerobicLow", "Low aerobic", "#5aa9e6"}};
                 double max = 0;
@@ -1544,7 +1616,7 @@ public class DescribeGarminFile {
                     h.append("<div class=\"zone\"><span class=\"zl\">").append(p[1]).append("</span><span class=\"bar\"><span class=\"band\" style=\"left:")
                             .append(pct(lo, max)).append("%;width:").append(pct(hi - lo, max)).append("%\"></span><span style=\"width:")
                             .append(pct(v, max)).append("%;background:").append(p[2]).append("\"></span></span><span class=\"zv\">")
-                            .append(fmtNum(v, 0)).append(" <small>(target ").append(fmtNum(lo, 0)).append("–").append(fmtNum(hi, 0)).append(")</small></span></div>");
+                            .append(fmtNum(v, 0)).append(" <small>(").append(t("target", "doel")).append(" ").append(fmtNum(lo, 0)).append("–").append(fmtNum(hi, 0)).append(")</small></span></div>");
                 }
                 h.append("</div>");
             }
@@ -1602,10 +1674,22 @@ public class DescribeGarminFile {
         }
 
         void tile(String value, String label, String field, String src) {
+            int sm = label.indexOf(" <small>");
             h.append("<div class=\"tile\" title=\"").append(esc(field)).append("\"><div class=\"v\">").append(value.contains("<small>") ? value : esc(value))
-                    .append("</div><div class=\"l\">").append(label.contains("<small>") ? label : esc(label));
+                    .append("</div><div class=\"l\">").append(sm >= 0 ? tileLabel(label.substring(0, sm)) + label.substring(sm) : tileLabel(label));
             if (src != null) h.append(" ").append(chip(src));
             h.append("</div></div>");
+        }
+
+        /** A tile label in its Dutch version too ("VO₂ max running" has a Dutch word for the sport). */
+        static String tileLabel(String label) {
+            if (label.startsWith("VO₂ max ")) {
+                String sp = label.substring(8);
+                return t(esc(label), "VO₂ max " + esc(sp.equals("running") ? "hardlopen" : sp.equals("cycling") ? "fietsen" : sp));
+            }
+            if (label.startsWith("Aerobic TE")) return t("Aerobic TE", "Aeroob TE");
+            if (label.startsWith("Anaerobic TE")) return t("Anaerobic TE", "Anaeroob TE");
+            return tr(label);
         }
 
         void wt(Map<String, Object> m, String key, String label, java.util.function.DoubleFunction<String> f) {
@@ -1795,7 +1879,7 @@ public class DescribeGarminFile {
             String mn = valid.isEmpty() ? "" : invert ? fmtPaceMin(valid.max()) : fmtNum(valid.min(), decimals);
             StringBuilder svg = new StringBuilder("<figure class=\"chart\"><figcaption>").append(esc(title))
                     .append(" <span class=\"muted\">").append(esc(unit)).append(field != null ? " · " + esc(field) : "")
-                    .append("</span><span class=\"stats\">min ").append(mn).append(" · avg ").append(avg).append(" · max ").append(mx)
+                    .append("</span><span class=\"stats\">min ").append(mn).append(" · ").append(t("avg", "gem.")).append(" ").append(avg).append(" · max ").append(mx)
                     .append("</span></figcaption><svg viewBox=\"0 0 ").append(W).append(' ').append(H).append("\" id=\"").append(id)
                     .append("\" data-pts='").append(pts).append("' role=\"img\" aria-label=\"").append(esc(title)).append("\">");
             for (double t : ticks) {
@@ -1843,6 +1927,12 @@ public class DescribeGarminFile {
                 }
             }
             return render();
+        }
+
+        /** The summaries of all reports, oldest first; scans the reports (and writes the overview) the first time. */
+        static java.util.Collection<Entry> entries() throws IOException {
+            if (cache == null) write();
+            return cache.values();
         }
 
         /** Updates the overview for one day whose report was written or removed; scans everything the first time. */
@@ -1896,11 +1986,14 @@ public class DescribeGarminFile {
             StringBuilder h = new StringBuilder();
             h.append("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">")
                     .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">").append(favicon("#2563eb"))
-                    .append("<title>Garmin reports · ").append(esc(accountLabel(account))).append("</title><style>").append(CSS).append("</style></head><body><main>")
-                    .append("<header><div class=\"eyebrow\">Garmin day reports · ").append(esc(accountLabel(account))).append("</div>")
-                    .append(accountLinks()).append("<h1>Overview</h1><p class=\"sub\">")
-                    .append(entries.size()).append(" days · updated ").append(DT.format(LocalDateTime.now()))
-                    .append(" · regenerated every time DescribeGarminFile writes a report</p></header>");
+                    .append("<title>Garmin reports · ").append(esc(accountLabel(account))).append("</title>").append(Site.HEAD)
+                    .append("<style>").append(CSS).append("</style></head><body><main>").append(Site.nav("index.html", 0));
+            String label = esc(accountLabel(account)), now = DT.format(LocalDateTime.now());
+            h.append("<header><div class=\"eyebrow\" data-nl=\"Garmin-dagrapporten · ").append(esc(label)).append("\">Garmin day reports · ").append(label).append("</div>")
+                    .append("<h1 data-nl=\"Overzicht\">Overview</h1><p class=\"sub\">")
+                    .append(t(entries.size() + " days · updated " + now + " · regenerated every time DescribeGarminFile writes a report",
+                            entries.size() + " dagen · bijgewerkt " + now + " · opnieuw gemaakt telkens DescribeGarminFile een rapport schrijft"))
+                    .append("</p></header>");
 
             Totals all = new Totals();
             entries.forEach(all::add);
@@ -1908,88 +2001,84 @@ public class DescribeGarminFile {
             all.tiles(h);
             h.append("</div>");
             h.append("<div class=\"filters\"><input class=\"filter\" id=\"q\" type=\"search\" ")
-                    .append("placeholder=\"Text, e.g. Zwembad, 2026-09…\" oninput=\"filterRows()\">")
-                    .append("<select id=\"sport\" onchange=\"autoUnit();filterRows()\"><option value=\"\">All activities</option>");
+                    .append("placeholder=\"Text, e.g. Zwembad, 2026-09…\" data-nl-placeholder=\"Tekst, bv. Zwembad, 2026-09…\" oninput=\"filterRows()\">")
+                    .append("<select id=\"sport\" onchange=\"autoUnit();filterRows()\"><option value=\"\" data-nl=\"Alle activiteiten\">All activities</option>");
             for (var g : all.byCount()) {
-                h.append("<option value=\"").append(esc(g.getKey())).append("\">").append(esc(sportName(g.getKey())))
-                        .append(" (").append(g.getValue().values().stream().mapToInt(Integer::intValue).sum()).append(")</option>");
+                String n = " (" + g.getValue().values().stream().mapToInt(Integer::intValue).sum() + ")";
+                h.append("<option value=\"").append(esc(g.getKey())).append("\" data-nl=\"").append(esc(esc(sportNameNl(g.getKey())) + n)).append("\">")
+                        .append(esc(sportName(g.getKey()))).append(n).append("</option>");
                 // A group of several Garmin types can also be narrowed to one of them ("t:<type>").
                 if (g.getValue().size() > 1) for (var t : Totals.typesByCount(g.getValue()))
-                    h.append("<option value=\"t:").append(esc(t.getKey())).append("\">\u2003– ").append(esc(sportName(t.getKey())))
-                            .append(" (").append(t.getValue()).append(")</option>");
+                    h.append("<option value=\"t:").append(esc(t.getKey())).append("\" data-nl=\"").append(esc("\u2003– " + esc(sportNameNl(t.getKey())) + " (" + t.getValue() + ")"))
+                            .append("\">\u2003– ").append(esc(sportName(t.getKey()))).append(" (").append(t.getValue()).append(")</option>");
             }
-            h.append("</select><label>Distance <input id=\"dmin\" type=\"text\" inputmode=\"decimal\" placeholder=\"min\" oninput=\"filterRows()\">")
+            h.append("</select><label>").append(t("Distance", "Afstand")).append(" <input id=\"dmin\" type=\"text\" inputmode=\"decimal\" placeholder=\"min\" oninput=\"filterRows()\">")
                     .append(" – <input id=\"dmax\" type=\"text\" inputmode=\"decimal\" placeholder=\"max\" oninput=\"filterRows()\"> km</label>")
-                    .append("<label>Speed <input id=\"smin\" type=\"text\" inputmode=\"decimal\" placeholder=\"min\" oninput=\"filterRows()\">")
+                    .append("<label>").append(t("Speed", "Snelheid")).append(" <input id=\"smin\" type=\"text\" inputmode=\"decimal\" placeholder=\"min\" oninput=\"filterRows()\">")
                     .append(" – <input id=\"smax\" type=\"text\" inputmode=\"decimal\" placeholder=\"max\" oninput=\"filterRows()\"> ")
                     // Pace units for running/walking (min/km) and swimming (min/100 m); "5:00" or "5.0" both work.
                     .append("<select id=\"sunit\" onchange=\"updUnit();filterRows()\"><option value=\"kmh\">km/h</option>")
                     .append("<option value=\"km\">min/km</option><option value=\"100\">min/100 m</option></select></label>")
-                    .append("<label>From <input id=\"dfrom\" type=\"date\" onchange=\"filterRows()\"></label>")
-                    .append("<label>to <input id=\"dto\" type=\"date\" onchange=\"filterRows()\"></label><span class=\"ranges\">")
-                    .append("<a href=\"#\" data-range=\"30\" onclick=\"return setRange('30')\">Last 30 days</a>")
-                    .append("<a href=\"#\" data-range=\"month\" onclick=\"return setRange('month')\">This month</a>")
-                    .append("<a href=\"#\" data-range=\"year\" onclick=\"return setRange('year')\">This year</a>")
-                    .append("<a href=\"#\" data-range=\"lastyear\" onclick=\"return setRange('lastyear')\">Last year</a></span>")
+                    .append("<label>").append(t("From", "Van")).append(" <input id=\"dfrom\" type=\"date\" onchange=\"filterRows()\"></label>")
+                    .append("<label>").append(t("to", "tot")).append(" <input id=\"dto\" type=\"date\" onchange=\"filterRows()\"></label><span class=\"ranges\">")
+                    .append("<a href=\"#\" data-range=\"30\" onclick=\"return setRange('30')\" data-nl=\"Laatste 30 dagen\">Last 30 days</a>")
+                    .append("<a href=\"#\" data-range=\"month\" onclick=\"return setRange('month')\" data-nl=\"Deze maand\">This month</a>")
+                    .append("<a href=\"#\" data-range=\"year\" onclick=\"return setRange('year')\" data-nl=\"Dit jaar\">This year</a>")
+                    .append("<a href=\"#\" data-range=\"lastyear\" onclick=\"return setRange('lastyear')\" data-nl=\"Vorig jaar\">Last year</a></span>")
                     .append("<span id=\"filterStatus\"></span></div>");
 
             // Filled in by the page script from the visible rows, so the records follow the filters.
             // The chart, calendar and records are folded away by default; these buttons open them.
-            h.append("<div class=\"ranges panels\"><a href=\"#\" data-panel=\"trend\" onclick=\"return togglePanel('trend')\">📊 Chart</a>")
-                    .append("<a href=\"#\" data-panel=\"calendar\" onclick=\"return togglePanel('calendar')\">📅 Calendar</a>")
-                    .append("<a href=\"#\" data-panel=\"records\" onclick=\"return togglePanel('records')\">🏆 Records</a>")
-                    .append("<a href=\"").append(Heatmap.PAGE_FILE).append("\">🗺️ Heatmap</a></div>");
+            // The other pages are in the Site menu at the top.
+            h.append("<div class=\"ranges panels\"><a href=\"#\" data-panel=\"trend\" onclick=\"return togglePanel('trend')\" data-nl=\"📊 Grafiek\">📊 Chart</a>")
+                    .append("<a href=\"#\" data-panel=\"calendar\" onclick=\"return togglePanel('calendar')\" data-nl=\"📅 Kalender\">📅 Calendar</a>")
+                    .append("<a href=\"").append(Records.PAGE_FILE).append("\">🏆 Records</a>");
+            h.append("</div>");
             h.append("<section class=\"card panel folded\" id=\"trend\" hidden><div class=\"trend-head\"><h2 id=\"trendTitle\">Per month</h2>")
-                    .append("<span class=\"ranges\" id=\"trendMetric\"><a href=\"#\" data-m=\"dist\" onclick=\"return setMetric('dist')\">Distance</a>")
-                    .append("<a href=\"#\" data-m=\"dur\" onclick=\"return setMetric('dur')\">Time</a>")
-                    .append("<a href=\"#\" data-m=\"n\" onclick=\"return setMetric('n')\">Activities</a></span></div>")
-                    .append("<p class=\"sub\" id=\"trendSub\"></p><div class=\"legend\" id=\"trendLegend\"></div><div id=\"trendChart\"></div></section>");
+                    .append("<span class=\"ranges\" id=\"trendMetric\"><a href=\"#\" data-m=\"dist\" onclick=\"return setMetric('dist')\" data-nl=\"Afstand\">Distance</a>")
+                    .append("<a href=\"#\" data-m=\"dur\" onclick=\"return setMetric('dur')\" data-nl=\"Tijd\">Time</a>")
+                    .append("<a href=\"#\" data-m=\"n\" onclick=\"return setMetric('n')\" data-nl=\"Activiteiten\">Activities</a></span></div>")
+                    .append("<p class=\"sub\" id=\"trendSub\"></p><div class=\"ranges trendnav\" id=\"trendNav\"></div><div class=\"legend\" id=\"trendLegend\"></div><div id=\"trendChart\"></div></section>");
+            // Year navigation: ‹ previous year, a menu of the years with matching activities, next year ›.
             h.append("<section class=\"card panel folded\" id=\"calendar\" hidden><div class=\"trend-head\"><h2 id=\"calTitle\">Calendar</h2>")
                     .append("<span class=\"ranges\"><a href=\"#\" id=\"calPrev\" onclick=\"return stepCal(-1)\">‹</a>")
+                    .append("<select id=\"calYear\" onchange=\"return pickCal(this.value)\" aria-label=\"Year\" data-nl-aria=\"Jaar\"></select>")
                     .append("<a href=\"#\" id=\"calNext\" onclick=\"return stepCal(1)\">›</a></span></div>")
                     .append("<p class=\"sub\" id=\"calSub\"></p><div class=\"legend\" id=\"calLegend\"></div><div id=\"calChart\"></div></section>");
-            h.append("<section class=\"card panel folded\" id=\"records\" hidden><h2>Records</h2><p class=\"sub\" id=\"recordsSub\"></p>")
-                    .append("<div class=\"tiles\" id=\"recordTiles\"></div></section>");
             Map<String, List<Entry>> byMonth = new LinkedHashMap<>();
             for (Entry e : entries) byMonth.computeIfAbsent(e.date.toString().substring(0, 7), k -> new ArrayList<>()).add(e);
             for (var m : byMonth.entrySet()) {
                 LocalDate first = LocalDate.parse(m.getKey() + "-01");
                 Totals t = new Totals();
                 m.getValue().forEach(t::add);
-                h.append("<section class=\"card month\"><h2>").append(first.getMonth().getDisplayName(TextStyle.FULL, Locale.ENGLISH))
-                        .append(" ").append(first.getYear()).append("</h2><p class=\"sub\">").append(t.line()).append("</p>")
+                h.append("<section class=\"card month\"><h2 data-nl=\"").append(monthNl(first)).append(" ").append(first.getYear()).append("\">")
+                        .append(first.getMonth().getDisplayName(TextStyle.FULL, Locale.ENGLISH))
+                        .append(" ").append(first.getYear()).append("</h2><p class=\"sub\" data-nl=\"").append(esc(t.line(true))).append("\">").append(t.line(false)).append("</p>")
                         .append("<div class=\"scroll\"><table><thead><tr><th>Date</th><th>Day</th><th>Activities</th><th>Distance</th><th>Pace / speed</th>")
                         .append("<th>Activity time</th><th>Activity kcal</th><th>Steps</th><th>Sleep score</th><th>Sleep</th>")
                         .append("<th>Resting HR</th><th>HRV</th><th>Body battery max</th><th>Avg stress</th></tr></thead><tbody>");
                 for (Entry e : m.getValue()) row(h, e);
                 h.append("</tbody></table></div></section>");
             }
-            h.append("<footer>Click a column header to sort. A distance marked ≈ is a corrected pool-swim distance ")
-                    .append("(recounted from the stroke count; hover for Garmin's value, details in the day report). Reports live in <code>").append(esc(DATA_DIR.toString()))
-                    .append("</code>.</footer></main><div id=\"tip\"></div><script>var FILTER_KEY=").append(jsStr(filterKey())).append(";").append(JS)
-                    .append(OVERVIEW_JS)
+            String dir = "<code>" + esc(DATA_DIR.toString()) + "</code>";
+            h.append("<footer>").append(t("Click a column header to sort. A distance marked ≈ is a corrected swim distance "
+                                    + "(pool swims recounted from the stroke count, open-water swims estimated from swim time; hover for Garmin's value, details in the day report). Reports live in " + dir + ".",
+                            "Klik op een kolomkop om te sorteren. Een afstand met ≈ is een gecorrigeerde zwemafstand "
+                                    + "(zwembad herteld uit het aantal slagen, open water geschat uit de zwemtijd; ga erover voor de waarde van Garmin, details in het dagrapport). De rapporten staan in " + dir + "."))
+                    .append("</footer></main><div id=\"tip\"></div><script>var FILTER_KEY=").append(jsStr(filterKey())).append(",SPORT_NL=").append(sportNlJs()).append(";").append(JS)
+                    .append(OVERVIEW_JS).append(SUBS_JS)
                     .append("</script></body></html>");
-            return h.toString();
+            return localize(h.toString());
         }
 
-        /** Links to the other accounts' overviews (folders garmin and garmin-* next to this one), when there are any. */
-        private static String accountLinks() {
-            List<String> names = new ArrayList<>();
-            try (Stream<Path> s = Files.list(RESOURCES)) {
-                s.map(p -> p.getFileName().toString()).filter(n -> n.equals("garmin") || n.matches("garmin-[a-z0-9_-]+"))
-                        .filter(n -> Files.exists(RESOURCES.resolve(n).resolve(OVERVIEW_FILE)) || RESOURCES.resolve(n).equals(DATA_DIR))
-                        .sorted().forEach(n -> names.add(n.equals("garmin") ? MAIN_ACCOUNT : n.substring(7)));
-            } catch (IOException e) {
-                return "";
+        /** English sport name → Dutch, for the page script (activity tooltips, chart legends). */
+        private static String sportNlJs() {
+            StringBuilder j = new StringBuilder("{");
+            for (var e : new TreeMap<>(SPORT_NL).entrySet()) {
+                if (j.length() > 1) j.append(',');
+                j.append(jsStr(sportName(e.getKey()))).append(':').append(jsStr(e.getValue()));
             }
-            if (names.size() < 2) return "";
-            StringBuilder h = new StringBuilder("<div class=\"ranges accounts\">");
-            for (String n : names) {
-                String href = "../" + dataDir(n).getFileName() + "/" + OVERVIEW_FILE;
-                h.append("<a href=\"").append(esc(href)).append("\"").append(n.equals(account) ? " class=\"on\"" : "").append(">")
-                        .append(esc(accountLabel(n))).append("</a>");
-            }
-            return h.append("</div>").toString();
+            return j.append('}').toString();
         }
 
         private static void row(StringBuilder h, Entry e) {
@@ -2010,17 +2099,18 @@ public class DescribeGarminFile {
                 // Garmin's averageSpeed is exactly distance / (timer) duration, so it can be derived here.
                 double kmh = d != null && dur != null && d > 0 && dur > 0 ? d / dur * 3.6 : 0;
                 // Links to the activity's section in the day report (sections are #act0, #act1, … in the same order).
-                names.append("<a class=\"act\" href=\"").append(esc(e.href)).append("#act").append(ai)
+                names.append("<a class=\"act\" href=\"").append(esc(e.href)).append("#act").append(sectionOf(s, o))
                         .append("\" data-sport=\"").append(esc(str(at(o, "sport")))).append("\" data-group=\"")
                         .append(esc(sportGroup(str(at(o, "sport"))))).append("\" data-dist=\"")
                         .append(d == null ? 0 : Math.round(d)).append("\" data-kmh=\"").append(Math.round(kmh * 100) / 100.0)
                         .append("\" data-dur=\"").append(dur == null ? 0 : Math.round(dur))
-                        .append(NOT_A_RECORD.contains(e.date + " " + str(at(o, "start"))) ? "\" data-norec=\"1" : "")
+                        .append(NOT_A_RECORD.contains(e.date + " " + str(at(o, "start"))) || str(at(o, "sport")).equals("treadmill_running") ? "\" data-norec=\"1" : "")
                         .append("\" title=\"").append(esc(sportName(str(at(o, "sport")))))
                         .append(kmh > 0 ? " · " + fmtNum(kmh, 1) + " km/h" : "").append("\">")
                         .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name")))).append("</a>");
                 dists.append(d == null || d <= 0 ? "<span class=\"muted\">–</span>"
-                        : corrected ? "<span class=\"corr\" title=\"Corrected from the stroke count; Garmin: "
+                        : corrected ? "<span class=\"corr\" title=\"" + (str(at(o, "sport")).equals("open_water_swimming")
+                                      ? "Estimated from swim time and pool pace; Garmin: " : "Corrected from the stroke count; Garmin: ")
                                       + (garmin == null ? "–" : fmtDist(garmin)) + "\">≈ " + fmtDist(d) + "</span>"
                         : "<span>" + fmtDist(d) + "</span>");
                 paces.append("<span>").append(kmh > 0 ? esc(paceOrSpeed(str(at(o, "sport")), kmh)) : "<span class=\"muted\">–</span>").append("</span>");
@@ -2058,6 +2148,8 @@ public class DescribeGarminFile {
         private static final Map<String, String> SPORT_GROUPS = Map.ofEntries(
                 Map.entry("road_biking", "cycling"),
                 Map.entry("mountain_biking", "cycling"),
+                Map.entry("cyclocross", "cycling"),
+                Map.entry("gravel_cycling", "cycling"),
                 Map.entry("virtual_ride", "indoor_cycling"),
                 Map.entry("casual_walking", "walking"),
                 Map.entry("hiking", "walking"),
@@ -2070,10 +2162,14 @@ public class DescribeGarminFile {
                 Map.entry("trail_running", "running"),
                 Map.entry("obstacle_run", "running"),
                 Map.entry("street_running", "running"),
+                Map.entry("treadmill_running", "running"),
                 Map.entry("badminton", "racket_sports"),
                 Map.entry("table_tennis", "racket_sports"),
                 Map.entry("multi_sport", "others"),
                 Map.entry("breathwork", "others"),
+                Map.entry("training", "others"),
+                Map.entry("indoor_cardio", "others"),
+                Map.entry("other", "others"),
                 Map.entry("lap_swimming", "swimming"),
                 Map.entry("open_water_swimming", "swimming"));
 
@@ -2082,18 +2178,26 @@ public class DescribeGarminFile {
          * the totals. 2012-12-13 20:33: a 53 km "run" of 8:53, not an actual run (confirmed by the user);
          * 2012-12-17 13:02: the same pattern (46 km in 8:48, also just named "running").
          */
-        private static final Set<String> NOT_A_RECORD = Set.of("2012-12-13 20:33", "2012-12-17 13:02");
+        static final Set<String> NOT_A_RECORD = Set.of("2012-12-13 20:33", "2012-12-17 13:02");
 
         /**
          * Activity types left out of the overview (tiles, totals and rows); the day report still shows them.
-         * overland: a single 5-second recording without distance (2025-02-27), started by accident.
+         * overland: a single 5-second recording without distance (2025-02-27), started by accident;
+         * excluded: marked by hand in sport-overrides.tsv (someone else's activity, a trip partly by car).
          */
-        static final Set<String> HIDDEN_SPORTS = Set.of("overland");
+        static final Set<String> HIDDEN_SPORTS = Set.of("overland", SportCorrection.EXCLUDED);
 
         /** The day's activities as the overview counts them. */
-        private static List<Object> shown(Map<String, Object> summary) {
+        static List<Object> shown(Map<String, Object> summary) {
             List<Object> acts = Optional.ofNullable(asList(summary.get("activities"))).orElse(List.of());
             return acts.stream().filter(o -> !HIDDEN_SPORTS.contains(str(at(o, "sport")))).toList();
+        }
+
+        /** The activity's section in its day report (#act0, #act1, …), counted over all activities, hidden ones too. */
+        static int sectionOf(Map<String, Object> summary, Object activity) {
+            List<Object> all = Optional.ofNullable(asList(summary.get("activities"))).orElse(List.of());
+            for (int i = 0; i < all.size(); i++) if (all.get(i) == activity) return i;
+            return Math.max(0, all.indexOf(activity));
         }
 
         /** Garmin's sport key for display, without its version suffix (kayaking_v2 → Kayaking). */
@@ -2106,7 +2210,7 @@ public class DescribeGarminFile {
         }
 
         /** The corrected distance where one exists (pool swims), else Garmin's. */
-        private static Double distanceOf(Object activity) {
+        static Double distanceOf(Object activity) {
             Double c = num(at(activity, "correctedDistance"));
             return c != null ? c : num(at(activity, "distance"));
         }
@@ -2157,9 +2261,10 @@ public class DescribeGarminFile {
                 steps += numOr(e.summary.get("steps"), 0);
             }
 
-            String line() {
+            String line(boolean dutch) {
                 StringBuilder s = new StringBuilder();
-                s.append(days).append(" days · ").append(activities).append(" activities · ").append(fmtDist(dist)).append(" · ").append(fmtDur(time));
+                s.append(days).append(dutch ? " dagen · " : " days · ").append(activities).append(dutch ? " activiteiten · " : " activities · ")
+                        .append(fmtDist(dist)).append(" · ").append(fmtDur(time));
                 if (!groups.isEmpty()) {
                     s.append(" · ");
                     groups.keySet().stream().sorted((a, b) -> count(b) - count(a))
@@ -2170,11 +2275,11 @@ public class DescribeGarminFile {
 
             void tiles(StringBuilder h) {
                 // The ids let the filter show the totals of what is selected.
-                tile(h, String.valueOf(days), "Days with a report", "tDays");
-                tile(h, String.valueOf(activities), "Activities", "tActs");
-                tile(h, fmtDist(dist), "Total distance", "tDist");
-                tile(h, fmtDur(time), "Total activity time", "tTime");
-                if (steps > 0) tile(h, fmtNum(steps, 0), "Steps", "tSteps");
+                tile(h, String.valueOf(days), "Days with a report", "Dagen met een rapport", "tDays");
+                tile(h, String.valueOf(activities), "Activities", "Activiteiten", "tActs");
+                tile(h, fmtDist(dist), "Total distance", "Totale afstand", "tDist");
+                tile(h, fmtDur(time), "Total activity time", "Totale activiteitstijd", "tTime");
+                if (steps > 0) tile(h, fmtNum(steps, 0), "Steps", "Stappen", "tSteps");
                 // The clickable activity tiles get their own grid, so they always start on a new row.
                 h.append("</div><div class=\"tiles sports\">");
                 for (var g : byCount()) {
@@ -2182,21 +2287,26 @@ public class DescribeGarminFile {
                     h.append("<a class=\"tile link\" href=\"#sport=").append(esc(key)).append("\" data-sport=\"").append(esc(key))
                             .append("\" data-types=\"").append(esc(String.join(" ", g.getValue().keySet())))
                             .append("\" title=\"Show only ").append(esc(sportName(key)))
-                            .append(" activities\" onclick=\"return toggleSport(this.dataset.sport)\"><div class=\"v\">")
-                            .append(esc(sportIcon(key))).append(" <span class=\"n\">").append(count(key)).append("</span></div><div class=\"l\">").append(esc(sportName(key)));
+                            .append(" activities\" data-nl-title=\"Toon alleen ").append(esc(sportNameNl(key).toLowerCase(Locale.ROOT)))
+                            .append("\" onclick=\"return toggleSport(this.dataset.sport)\"><div class=\"v\">")
+                            .append(esc(sportIcon(key))).append(" <span class=\"n\">").append(count(key)).append("</span></div><div class=\"l\">").append(sportSpan(key));
                     if (g.getValue().size() > 1) {
-                        h.append("<small>");
-                        for (var t : typesByCount(g.getValue()))
+                        h.append("<small class=\"subs\">");
+                        // Only the names are swapped for Dutch: the counts (data-type) are updated by the filter.
+                        for (var t : typesByCount(g.getValue())) {
+                            String en = sportName(t.getKey()).toLowerCase(Locale.ROOT), nl = sportNameNl(t.getKey()).toLowerCase(Locale.ROOT);
                             h.append("<br><span data-type=\"").append(esc(t.getKey())).append("\">").append(t.getValue()).append("</span> ")
-                                    .append(esc(sportName(t.getKey()).toLowerCase(Locale.ROOT)));
+                                    .append(en.equals(nl) ? esc(en) : t(esc(en), esc(nl)));
+                        }
                         h.append("</small>");
                     }
                     h.append("</div></a>");
                 }
             }
 
-            private static void tile(StringBuilder h, String v, String l, String id) {
-                h.append("<div class=\"tile\"><div class=\"v\" id=\"").append(id).append("\">").append(esc(v)).append("</div><div class=\"l\">").append(esc(l)).append("</div></div>");
+            private static void tile(StringBuilder h, String v, String l, String nl, String id) {
+                h.append("<div class=\"tile\"><div class=\"v\" id=\"").append(id).append("\">").append(esc(v)).append("</div><div class=\"l\" data-nl=\"")
+                        .append(esc(esc(nl))).append("\">").append(esc(l)).append("</div></div>");
             }
         }
     }
@@ -2620,7 +2730,7 @@ public class DescribeGarminFile {
         return asMap(m.values().iterator().next());
     }
 
-    private static Object at(Object root, String... path) {
+    static Object at(Object root, String... path) {
         Object cur = root;
         for (String p : path) {
             if (!(cur instanceof Map<?, ?> m)) return null;
@@ -2629,7 +2739,7 @@ public class DescribeGarminFile {
         return cur;
     }
 
-    private static Double num(Object o) {
+    static Double num(Object o) {
         if (o instanceof Number n) return n.doubleValue();
         return null;
     }
@@ -2639,7 +2749,7 @@ public class DescribeGarminFile {
         return d == null ? def : d;
     }
 
-    private static String str(Object o) {
+    static String str(Object o) {
         return o == null ? "" : o.toString();
     }
 
@@ -3310,6 +3420,172 @@ public class DescribeGarminFile {
         return s.isEmpty() ? key : Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
+    // ------------------------------------------------------------------ Dutch
+
+    /**
+     * Dutch for the fixed English texts of the reports and the overview (tile labels, headings, table headers, chart
+     * titles), keyed by the English text as it appears in the HTML (so "&amp;" escaped). The page shows them when the
+     * language is Dutch (see {@link Site#HEAD}); anything missing simply stays English.
+     */
+    private static final Map<String, String> NL = new HashMap<>();
+
+    static {
+        String[] pairs = {
+                // tiles: day + activity
+                "Activities", "Activiteiten", "Activity distance", "Activiteitsafstand", "Activity time", "Activiteitstijd",
+                "Activity calories", "Activiteitscalorieën", "Steps", "Stappen", "Total burned", "Totaal verbruikt",
+                "Resting HR", "Rusthartslag", "Sleep score", "Slaapscore", "Distance", "Afstand", "Duration", "Duur",
+                "Moving time", "Beweegtijd", "Elapsed time", "Totale tijd", "Avg pace", "Gem. tempo", "Avg speed", "Gem. snelheid",
+                "Avg moving speed", "Gem. beweegsnelheid", "Max speed", "Max. snelheid", "Avg heart rate", "Gem. hartslag",
+                "Max heart rate", "Max. hartslag", "Min heart rate", "Min. hartslag", "Calories", "Calorieën",
+                "Elevation gain", "Stijging", "Elevation loss", "Daling", "Max elevation", "Max. hoogte", "Min elevation", "Min. hoogte",
+                "Avg cadence", "Gem. cadans", "Avg stroke rate", "Gem. slagfrequentie", "Avg power", "Gem. vermogen",
+                "Normalized power", "Genormaliseerd vermogen", "Training load", "Trainingsbelasting",
+                "Moderate int. min", "Matig int. min", "Vigorous int. min", "Intensief int. min", "Pool length", "Badlengte",
+                "Active lengths", "Actieve banen", "Strokes", "Slagen", "Avg SWOLF", "Gem. SWOLF", "Avg strokes/length", "Gem. slagen/baan",
+                "Avg temperature", "Gem. temperatuur", "Sweat loss (est.)", "Zweetverlies (schatting)", "Body battery", "Body Battery",
+                "Primary benefit", "Belangrijkste effect",
+                // tiles: wellness
+                "Total distance", "Totale afstand", "Total calories", "Totaal calorieën", "Active calories", "Actieve calorieën",
+                "Resting (BMR) calories", "Rustcalorieën (BMR)", "Min HR", "Min. hartslag", "Max HR", "Max. hartslag",
+                "Moderate intensity", "Matige intensiteit", "Vigorous intensity", "Hoge intensiteit", "Floors up", "Verdiepingen op",
+                "Floors down", "Verdiepingen af", "Avg stress", "Gem. stress", "Body battery high", "Body Battery hoogste",
+                "Body battery low", "Body Battery laagste", "Body battery charged", "Body Battery opgeladen",
+                "Body battery drained", "Body Battery verbruikt", "Body battery at wake", "Body Battery bij ontwaken",
+                "Waking respiration", "Ademhaling (wakker)", "Avg SpO₂", "Gem. SpO₂", "Lowest SpO₂", "Laagste SpO₂",
+                "Highly active", "Zeer actief", "Active", "Actief", "Sedentary", "Inactief", "Sleeping", "Slapen",
+                "Asleep", "Geslapen", "Total sleep", "Totale slaap", "Deep", "Diep", "Light", "Licht", "REM", "REM", "Awake", "Wakker",
+                "Times awake", "Keren wakker", "Avg sleep HR", "Gem. hartslag in slaap", "Avg respiration", "Gem. ademhaling",
+                "Avg sleep stress", "Gem. stress in slaap", "Overnight HRV", "HRV 's nachts", "Body battery gained", "Body Battery gewonnen",
+                "Restless moments", "Onrustige momenten", "Sleep need", "Slaapbehoefte", "This week", "Deze week",
+                "Week moderate", "Week matig", "Week vigorous", "Week intensief", "Last night avg", "Gem. afgelopen nacht",
+                "Highest 5-min", "Hoogste 5 min", "7-day avg", "Gem. 7 dagen", "Balanced range", "Gebalanceerd bereik", "Status", "Status",
+                "Training status", "Trainingsstatus", "Acute load", "Acute belasting", "Acute:chronic ratio", "Acuut:chronisch-verhouding",
+                "Load focus", "Belastingsfocus", "Endurance score", "Uithoudingsscore", "Hill score", "Heuvelscore",
+                // stress / load bars
+                "Rest", "Rust", "Low", "Laag", "Medium", "Gemiddeld", "High", "Hoog", "Activity", "Activiteit", "Not measured", "Niet gemeten",
+                "Anaerobic", "Anaeroob", "High aerobic", "Hoog aeroob", "Low aerobic", "Laag aeroob",
+                // headings
+                "Source files", "Bronbestanden", "Over time", "Verloop", "Heart-rate zones", "Hartslagzones", "Laps", "Ronden",
+                "Pool lengths", "Banen", "Devices &amp; sensors", "Apparaten &amp; sensoren", "Everything in the files", "Alles in de bestanden",
+                "❤ Health &amp; wellness", "❤ Gezondheid &amp; welzijn", "Day summary", "Dagoverzicht", "Sleep", "Slaap",
+                "Through the day", "Door de dag", "Stress breakdown", "Stressverdeling", "Body battery events", "Body Battery-gebeurtenissen",
+                "Heart-rate variability", "Hartslagvariabiliteit", "Training readiness", "Trainingsgereedheid",
+                "Fitness &amp; training status", "Conditie &amp; trainingsstatus", "Intensity minutes", "Intensiteitsminuten",
+                "Everything in the file", "Alles in het bestand", "Records", "Records",
+                // charts
+                "Heart rate", "Hartslag", "Pace", "Tempo", "Speed", "Snelheid", "Elevation", "Hoogte", "Cadence", "Cadans", "Power", "Vermogen",
+                "Respiration", "Ademhaling", "Temperature (device)", "Temperatuur (toestel)", "Seconds per active length", "Seconden per actieve baan",
+                "Stress", "Stress", "Intensity minutes per 15 min", "Intensiteitsminuten per 15 min",
+                "Heart rate during sleep", "Hartslag tijdens de slaap", "HRV during sleep", "HRV tijdens de slaap",
+                "Body battery during sleep", "Body Battery tijdens de slaap", "HRV readings (5-min)", "HRV-metingen (5 min)",
+                "Sleep stages", "Slaapfasen",
+                // table headers
+                "File", "Bestand", "Type", "Type", "Size", "Grootte", "Contains", "Bevat", "Start", "Start", "Corrected", "Gecorrigeerd",
+                "Time", "Tijd", "Avg HR", "Gem. HS", "Max HR", "Max. HS", "Ascent", "Stijging", "Lengths", "Banen", "Stroke", "Slag",
+                "Intensity", "Intensiteit", "Trigger", "Trigger", "Timer", "Timer", "SWOLF", "SWOLF", "Pace /100m", "Tempo /100m",
+                "Stroke rate", "Slagfrequentie", "Index", "Index", "Manufacturer", "Fabrikant", "Product", "Product", "Serial", "Serienummer",
+                "Software", "Software", "Source", "Bron", "Battery", "Batterij", "Event", "Gebeurtenis", "Data", "Gegevens",
+                "Impact", "Effect", "Feedback", "Feedback", "Score", "Score", "Level", "Niveau", "Recovery time", "Hersteltijd",
+                "HRV", "HRV", "Load (ACWR)", "Belasting (ACWR)", "Stress history", "Stressgeschiedenis", "Sleep history", "Slaapgeschiedenis",
+                "Date", "Datum", "Day", "Dag", "Pace / speed", "Tempo / snelheid", "Activity kcal", "Activiteit kcal", "Body battery max", "Body Battery max.",
+                "Max speed", "Max. snelheid", "Avg speed (ext)", "Gem. snelheid (ext)", "Trackpoints", "Trackpunten",
+                // details
+                "Garmin Connect summary — all fields", "Garmin Connect-samenvatting — alle velden",
+                "FIT file — all messages", "FIT-bestand — alle berichten", "TCX file — laps, creator and track content", "TCX-bestand — ronden, maker en track",
+                "GPX file — track content", "GPX-bestand — track", "Show all lengths", "Toon alle banen", "Events", "Gebeurtenissen",
+        };
+        for (int i = 0; i < pairs.length; i += 2) NL.putIfAbsent(pairs[i], pairs[i + 1]);
+    }
+
+    /** Dutch for a fixed English text (as HTML), or null. "Laps (12)" finds "Laps". */
+    static String nl(String enHtml) {
+        String n = NL.get(enHtml);
+        if (n != null) return n;
+        java.util.regex.Matcher m = COUNT_SUFFIX.matcher(enHtml);
+        if (m.matches() && NL.containsKey(m.group(1))) return NL.get(m.group(1)) + m.group(2);
+        return null;
+    }
+
+    private static final Pattern COUNT_SUFFIX = Pattern.compile("(.+?)( \\(\\d+\\))");
+
+    /** {@code data-nl="…"} for a fixed English text (HTML) that has a Dutch version, else empty. */
+    static String nlAttr(String enHtml) {
+        String n = nl(enHtml);
+        return n == null ? "" : " data-nl=\"" + esc(n) + "\"";
+    }
+
+    /** English HTML that turns into the given Dutch HTML when the page is in Dutch. */
+    static String t(String en, String nl) {
+        return "<span data-nl=\"" + esc(nl) + "\">" + en + "</span>";
+    }
+
+    /** A fixed English text (plain), escaped, in a span with its Dutch version when there is one. */
+    static String tr(String en) {
+        String n = nl(esc(en));
+        return n == null ? esc(en) : "<span data-nl=\"" + esc(n) + "\">" + esc(en) + "</span>";
+    }
+
+    /** Headings and table headers made of a known text get their Dutch version (one pass over the finished page). */
+    private static final Pattern PLAIN_TAG = Pattern.compile("<(th|h2|h3|summary|figcaption|span class=\"zl\")>([^<]+)(</|<)");
+
+    static String localize(String html) {
+        java.util.regex.Matcher m = PLAIN_TAG.matcher(html);
+        StringBuilder out = new StringBuilder(html.length() + 4096);
+        while (m.find()) {
+            String text = m.group(2).trim(), n = nl(text);
+            String rep;
+            if (n == null) rep = m.group(0);
+            else if (m.group(3).equals("</")) rep = "<" + m.group(1) + " data-nl=\"" + esc(n) + "\">" + m.group(2) + "</";
+            // Text followed by more markup (a chip, a count): only the text itself is swapped.
+            else rep = "<" + m.group(1) + "><span data-nl=\"" + esc(n) + "\">" + m.group(2) + "</span><";
+            m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(rep));
+        }
+        m.appendTail(out);
+        return out.toString();
+    }
+
+    /** Overview sport groups (and the common Garmin types) in Dutch; anything else keeps its English name. */
+    private static final Map<String, String> SPORT_NL = Map.ofEntries(
+            Map.entry("running", "Hardlopen"), Map.entry("cycling", "Fietsen"), Map.entry("walking", "Wandelen"),
+            Map.entry("swimming", "Zwemmen"), Map.entry("indoor_cycling", "Indoor fietsen"),
+            Map.entry("rowing_and_paddling", "Roeien en peddelen"), Map.entry("racket_sports", "Racketsporten"),
+            Map.entry("others", "Overige"), Map.entry("other", "Overige"),
+            Map.entry("road_biking", "Wegfietsen"), Map.entry("mountain_biking", "Mountainbiken"), Map.entry("gravel_cycling", "Gravelfietsen"),
+            Map.entry("cyclocross", "Veldrijden"), Map.entry("virtual_ride", "Virtuele rit"), Map.entry("casual_walking", "Wandelen (rustig)"),
+            Map.entry("hiking", "Wandeltocht"), Map.entry("steps", "Stappen"), Map.entry("rowing_v2", "Roeien"), Map.entry("rowing", "Roeien"),
+            Map.entry("kayaking_v2", "Kajakken"), Map.entry("paddling_v2", "Peddelen"), Map.entry("whitewater_rafting_v2", "Wildwatervaren"),
+            Map.entry("track_running", "Baanlopen"), Map.entry("trail_running", "Traillopen"), Map.entry("obstacle_run", "Hindernisloop"),
+            Map.entry("street_running", "Straatlopen"), Map.entry("treadmill_running", "Loopband"), Map.entry("badminton", "Badminton"),
+            Map.entry("table_tennis", "Tafeltennis"), Map.entry("multi_sport", "Multisport"), Map.entry("breathwork", "Ademhalingsoefening"),
+            Map.entry("indoor_cardio", "Indoor cardio"), Map.entry("lap_swimming", "Baanzwemmen"), Map.entry("pool_swimming", "Baanzwemmen"),
+            Map.entry("open_water_swimming", "Openwaterzwemmen"), Map.entry("strength_training", "Krachttraining"), Map.entry("yoga", "Yoga"),
+            Map.entry("overland", "Over land"), Map.entry("tennis", "Tennis"), Map.entry("padel", "Padel"), Map.entry("squash", "Squash"));
+
+    /** A Garmin sport key or overview group in Dutch (falls back to the English name). */
+    static String sportNameNl(String sport) {
+        String n = SPORT_NL.get(sport);
+        return n != null ? n : Overview.sportName(sport);
+    }
+
+    /** A sport's English name in a span that turns Dutch with the page. */
+    static String sportSpan(String sport) {
+        String en = Overview.sportName(sport), n = sportNameNl(sport);
+        return n.equals(en) ? esc(en) : t(esc(en), esc(n));
+    }
+
+    private static final String[] MONTHS_NL = {"januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus",
+            "september", "oktober", "november", "december"};
+    private static final String[] DAYS_NL = {"maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"};
+
+    static String monthNl(LocalDate d) {
+        return MONTHS_NL[d.getMonthValue() - 1];
+    }
+
+    static String weekdayNl(LocalDate d) {
+        return DAYS_NL[d.getDayOfWeek().getValue() - 1];
+    }
+
     static String sportIcon(String sport) {
         String s = sport.toLowerCase(Locale.ROOT);
         if (s.contains("swim")) return "🏊";
@@ -3450,7 +3726,7 @@ public class DescribeGarminFile {
     }
 
     private static String srcLine(String src, String file, String what) {
-        return "<p class=\"from\">" + chip(src) + " from <code>" + esc(file) + "</code> · " + esc(what) + "</p>";
+        return "<p class=\"from\">" + chip(src) + " " + t("from", "uit") + " <code>" + esc(file) + "</code> · " + esc(what) + "</p>";
     }
 
     static final String CSS = """
@@ -3462,7 +3738,7 @@ public class DescribeGarminFile {
             @media (prefers-color-scheme:dark){:root{--bg:#0f1317;--card:#171c21;--fg:#e6e9ec;--muted:#8d98a3;--line:#2a3138;
               --c-deep:#3b5bdb;--c-light:#74a9f7;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300}}
             *{box-sizing:border-box}
-            section.activity,.anchor{scroll-margin-top:64px}.anchor{display:block}
+            section.activity,.anchor{scroll-margin-top:108px}.anchor{display:block}
             body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
             main{max-width:1100px;margin:0 auto;padding:24px 16px 60px}
             header{margin:8px 0 18px}.eyebrow{text-transform:uppercase;letter-spacing:.08em;font-size:12px;color:var(--muted);font-weight:600}
@@ -3470,10 +3746,13 @@ public class DescribeGarminFile {
             h3{font-size:15px;margin:26px 0 8px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
             .sub{color:var(--muted);margin:0 0 12px}.muted{color:var(--muted)}
             .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:18px 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-            nav{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;position:sticky;top:0;z-index:1000;padding:8px 0;background:var(--bg)}
-            nav a{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 12px;color:var(--fg);text-decoration:none;font-size:14px}
-            nav a:hover{border-color:var(--accent)}nav a.home{font-weight:600;color:var(--accent)}
+            nav:not(.site-nav){display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;position:sticky;top:var(--site-h,44px);z-index:1000;padding:8px 0;background:var(--bg)}
+            nav:not(.site-nav) a{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 12px;color:var(--fg);text-decoration:none;font-size:14px}
+            nav:not(.site-nav) a:hover{border-color:var(--accent)}nav:not(.site-nav) a.home{font-weight:600;color:var(--accent)}
+            .site-nav{margin:0 0 14px;padding-bottom:10px;border-bottom:1px solid var(--line);--site-active-fg:var(--accent)}
             .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin:8px 0 6px}
+            .tiles.sports small.subs{display:none}.tiles.sports.open small.subs{display:block}
+            .subtoggle{display:inline-block;margin:0 0 10px;font-size:13px;color:var(--muted);text-decoration:none}.subtoggle:hover{color:var(--accent)}
             .tile{border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:help}
             .tile .v{font-size:19px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.25}
             .tile .v small,.tile .l small{font-weight:400;color:var(--muted);font-size:12px}
@@ -3501,7 +3780,16 @@ public class DescribeGarminFile {
             .accounts{float:right;margin-top:-2px}
             section.panel.folded{display:none}.panels{margin:4px 0 8px}
             #calChart svg{width:100%;height:auto;display:block;max-width:900px}#calChart rect.day:hover{stroke:var(--fg);stroke-width:1.5}
-            #calendar .ranges a{min-width:34px;text-align:center}
+            #calendar .ranges{align-items:center}#calendar .ranges a{min-width:34px;text-align:center}
+            #calYear{padding:3px 8px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--fg);font:inherit;font-size:13px}
+            #recMode{margin-left:auto}#recordTiles[hidden],#recordYears[hidden]{display:none}
+            table.peryear{font-size:13px}table.peryear th,table.peryear td{white-space:nowrap}
+            table.peryear th{white-space:nowrap;vertical-align:bottom;text-align:right}table.peryear th:first-child{text-align:left}
+            table.peryear th small{font-weight:400;font-size:11.5px}table.peryear td,table.peryear th{padding:6px 7px}
+            table.peryear td a{color:inherit;text-decoration:none}table.peryear td a:hover{color:var(--accent);text-decoration:underline}
+            table.peryear td.best{background:color-mix(in srgb,var(--accent) 13%,transparent);font-weight:650}
+            table.peryear td.best a{color:var(--accent)}
+            html[lang=nl] #totals.filtered .tile .l::after{content:" · selectie"}
             .acts .dim,.dists .dim,.paces .dim{opacity:.35}
             .src{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.03em;padding:0 6px;border-radius:5px;color:#fff;vertical-align:1px;line-height:17px}
             .src-fit{background:var(--fit)}.src-tcx{background:var(--tcx)}.src-gpx{background:var(--gpx)}.src-json{background:var(--json)}.src-wellness{background:var(--wellness)}
@@ -3535,6 +3823,7 @@ public class DescribeGarminFile {
             .cursor{stroke:var(--muted);stroke-dasharray:3 3}
             #tip{position:fixed;pointer-events:none;background:var(--fg);color:var(--bg);font-size:12px;padding:3px 8px;border-radius:6px;display:none;z-index:2000;white-space:nowrap}
             .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);padding:4px 0 6px}
+            .trendnav{margin:2px 0 8px}.trendnav[hidden]{display:none}
             .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
             .map{height:380px;border-radius:10px;border:1px solid var(--line);margin:6px 0;z-index:0}
             .zones{display:flex;flex-direction:column;gap:6px;margin:6px 0}
@@ -3627,20 +3916,20 @@ public class DescribeGarminFile {
                   if(ok){days++;n+=hit;tot+=d;dur+=t;steps+=parseFloat(r.dataset.steps||'0');recs.push.apply(recs,rowActs);}
                   r.style.display=ok?'':'none';shown=shown||ok;});
                 s.style.display=shown?'':'none';});
-              renderRecords(recs,any);renderTrend(recs,from,to);CAL.year=null;renderCalendar(recs,to);
+              renderTrend(recs,from,to);CAL.year=null;renderCalendar(recs,to);
   document.getElementById('totals').classList.toggle('filtered',any);
               setTile('tDays',any?String(days):null);setTile('tActs',any?String(n):null);
               setTile('tDist',any?fmtKm(tot):null);setTile('tTime',any?fmtDur(dur):null);setTile('tSteps',any?fmtInt(steps):null);
-              document.querySelectorAll('.tile.link').forEach(function(t){
+              document.querySelectorAll('.tiles.sports .tile.link').forEach(function(t){
                 t.classList.toggle('on',!!sp&&(t.dataset.sport===sp||(typ!==null&&(t.dataset.types||'').split(' ').indexOf(typ)>=0)));
                 var c=gc[t.dataset.sport]||0;t.querySelector('.n').textContent=c;t.classList.toggle('zero',c===0);
                 t.querySelectorAll('[data-type]').forEach(function(x){x.textContent=tc[x.dataset.type]||0;});});
-              document.querySelectorAll('.ranges a').forEach(function(a){var r=rangeOf(a.dataset.range);
+              document.querySelectorAll('a[data-range]').forEach(function(a){var r=rangeOf(a.dataset.range);
                 a.classList.toggle('on',F.from.value===r[0]&&F.to.value===r[1]);});
               var st=document.getElementById('filterStatus');st.innerHTML='';
               if(any){
-                st.textContent=n+(n===1?' activity on ':' activities on ')+days+(days===1?' day':' days')+(tot>0?' · '+fmtKm(tot):'')+(dur>0?' · '+fmtDur(dur):'')+' ';
-                var x=document.createElement('a');x.href='#';x.textContent='✕ clear';x.onclick=clearFilters;st.appendChild(x);}
+                st.textContent=n+(n===1?L(' activity on ',' activiteit op '):L(' activities on ',' activiteiten op '))+days+(days===1?L(' day',' dag'):L(' days',' dagen'))+(tot>0?' · '+fmtKm(tot):'')+(dur>0?' · '+fmtDur(dur):'')+' ';
+                var x=document.createElement('a');x.href='#';x.textContent=L('✕ clear','✕ wissen');x.onclick=clearFilters;st.appendChild(x);}
               var p=new URLSearchParams();
               if(sp)p.set('sport',sp);['min','max','smin','smax','from','to'].forEach(function(k){if(F[k].value)p.set(k,F[k].value);});
               if((F.smin.value||F.smax.value)&&F.su.value!=='kmh')p.set('su',F.su.value);
@@ -3648,51 +3937,15 @@ public class DescribeGarminFile {
               var h=p.toString();history.replaceState(null,'',h?'#'+h:location.pathname+location.search);
               // Remembered so a day report's "← Overview" link can come back to the same filtered view.
               try{localStorage.setItem(window.FILTER_KEY||'garmin-overview-filter',h);}catch(e){}}
-            // ---- records, from the activities the filters leave
-            // Speeds above these are GPS glitches (or a ride saved as a run), not records.
-            var MAX_KMH={running:20,walking:12,swimming:8,cycling:65,indoor_cycling:70,rowing_and_paddling:20};
-            function paceStr(kmh,per100){return fmtDur((per100?360:3600)/kmh)+(per100?' /100 m':' /km');}
-            var RECORDS=[
-              {label:'Longest run',g:'running',by:'dist'},
-              {label:'Fastest run, 5 km or more',g:'running',min:5000,by:'kmh'},
-              {label:'Fastest run, 10 km or more',g:'running',min:10000,by:'kmh'},
-              {label:'Fastest half marathon or more',g:'running',min:21000,by:'kmh'},
-              {label:'Fastest marathon or more',g:'running',min:42000,by:'kmh'},
-              {label:'Longest ride',g:'cycling',by:'dist'},
-              {label:'Fastest ride, 40 km or more',g:'cycling',min:40000,by:'kmh'},
-              {label:'Fastest ride, 100 km or more',g:'cycling',min:100000,by:'kmh'},
-              {label:'Longest indoor ride',g:'indoor_cycling',by:'dur'},
-              {label:'Longest walk or hike',g:'walking',by:'dist'},
-              {label:'Longest swim',g:'swimming',by:'dist'},
-              {label:'Fastest swim, 1 km or more',g:'swimming',min:1000,by:'kmh'},
-              {label:'Longest row or paddle',g:'rowing_and_paddling',by:'dist'}];
-            function renderRecords(list,any){
-              var box=document.getElementById('records'),tiles=document.getElementById('recordTiles');tiles.innerHTML='';
-              RECORDS.forEach(function(rec){var best=null;
-                list.forEach(function(x){
-                  if(x.a.dataset.norec)return;if(rec.g&&x.group!==rec.g)return;if(rec.min&&x.dist<rec.min)return;
-                  if(rec.by==='kmh'&&(!(x.kmh>0)||x.kmh>(MAX_KMH[x.group]||999)))return;
-                  var v=x[rec.by];if(!(v>0))return;if(!best||v>best[rec.by])best=x;});
-                if(!best)return;
-                var per100=best.group==='swimming',pace=best.group==='running'||best.group==='walking'||per100;
-                var v=rec.by==='dist'?fmtKm(best.dist):rec.by==='dur'?fmtDur(best.dur):pace?paceStr(best.kmh,per100):best.kmh.toFixed(1)+' km/h';
-                var extra=rec.by==='kmh'?fmtKm(best.dist)+' in '+fmtDur(best.dur):rec.by==='dist'?fmtDur(best.dur)+(best.kmh>0?' · '+(pace?paceStr(best.kmh,per100):best.kmh.toFixed(1)+' km/h'):''):(best.dist>0?fmtKm(best.dist):'');
-                var t=document.createElement('a');t.className='tile link';t.href=best.a.getAttribute('href');t.title='Open this activity';
-                var vd=document.createElement('div');vd.className='v';vd.textContent=v;
-                var ld=document.createElement('div');ld.className='l';ld.textContent=rec.label;
-                var sm=document.createElement('small');sm.innerHTML='<br>';sm.appendChild(document.createTextNode(best.date+' · '+best.a.textContent.trim()));
-                sm.appendChild(document.createElement('br'));sm.appendChild(document.createTextNode(extra));
-                ld.appendChild(sm);t.appendChild(vd);t.appendChild(ld);tiles.appendChild(t);});
-              box.hidden=!tiles.children.length;
-              document.getElementById('recordsSub').textContent=any?'Within the current selection. Click a record to open the activity.'
-                :'All activities. They follow the filters above, e.g. pick This year for this year’s records. Click a record to open the activity.';}
             // ---- per period chart (distance, time or count), stacked by sport; also follows the filters
-            var SERIES=[['running','Running'],['cycling','Cycling'],['indoor_cycling','Indoor cycling'],['walking','Walking'],['swimming','Swimming'],['other','Other']];
+            var SERIES=[['running',L('Running','Hardlopen')],['cycling',L('Cycling','Fietsen')],['indoor_cycling',L('Indoor cycling','Indoor fietsen')],['walking',L('Walking','Wandelen')],['swimming',L('Swimming','Zwemmen')],['other',L('Other','Overige')]];
             var METRIC='dist';try{METRIC=localStorage.getItem('garmin-overview-metric')||'dist';}catch(e){}
             var LAST={recs:[],from:'',to:''};
             function setMetric(m){METRIC=m;try{localStorage.setItem('garmin-overview-metric',m);}catch(e){}renderTrend(LAST.recs,LAST.from,LAST.to);return false;}
-            var MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-            var MONTHS_FULL=['January','February','March','April','May','June','July','August','September','October','November','December'];
+            var MONTHS=LANG==='nl'?['jan','feb','mrt','apr','mei','jun','jul','aug','sep','okt','nov','dec']:['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            var MONTHS_FULL=LANG==='nl'?['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december']
+              :['January','February','March','April','May','June','July','August','September','October','November','December'];
+            var WDAYS=LANG==='nl'?['zo','ma','di','wo','do','vr','za']:['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
             function seriesOf(g){for(var i=0;i<5;i++)if(SERIES[i][0]===g)return i;return 5;}
             function utc(s){return new Date(Date.UTC(+s.slice(0,4),+s.slice(5,7)-1,+s.slice(8,10)));}
             function iso(d){return d.toISOString().slice(0,10);}
@@ -3710,32 +3963,54 @@ public class DescribeGarminFile {
               recs.forEach(function(r){var i=idx[r.date.slice(0,cut)];if(i===undefined)return;
                 var v=METRIC==='dist'?r.dist/1000:METRIC==='dur'?r.dur/3600:1;var s=seriesOf(r.group);vals[i][s]+=v;used[s]+=v;});
               var totals=vals.map(function(v){return v.reduce(function(x,y){return x+y;},0);}),max=Math.max.apply(null,totals.concat([0]));
-              var what=METRIC==='dist'?'Distance':METRIC==='dur'?'Time':'Activities';
-              document.getElementById('trendTitle').textContent=what+' per '+unit;
-              document.getElementById('trendSub').textContent=(unit==='day'?'':'Click a bar to zoom in to that '+unit+'. ')+'Follows the filters above.';
+              var what=METRIC==='dist'?L('Distance','Afstand'):METRIC==='dur'?L('Time','Tijd'):L('Activities','Activiteiten');
+              var unitN=L(unit,{day:'dag',month:'maand',year:'jaar'}[unit]);
+              document.getElementById('trendTitle').textContent=what+' per '+unitN;
+              document.getElementById('trendSub').textContent=(unit==='day'?'':L('Click a bar to zoom in to that '+unit+'. ','Klik op een balk om in te zoomen op die '+unitN+'. '))+L('Follows the filters above.','Volgt de filters hierboven.');
               document.querySelectorAll('#trendMetric a').forEach(function(x){x.classList.toggle('on',x.dataset.m===METRIC);});
+              // Zoomed in on one year or one month (by clicking a bar): step to the one before or after, or back out.
+              var nav=document.getElementById('trendNav'),f=from||'',zy=null,zm=null;
+              if(/^\\d{4}-01-01$/.test(f)&&to===f.slice(0,4)+'-12-31')zy=+f.slice(0,4);
+              else if(/^\\d{4}-\\d{2}-01$/.test(f)&&to===iso(new Date(Date.UTC(+f.slice(0,4),+f.slice(5,7),0))))zm=[+f.slice(0,4),+f.slice(5,7)-1];
+              // The first and last day with data (all rows, not only the filtered ones) bound the ‹ and › steps.
+              var allDates=[].map.call(document.querySelectorAll('tr[data-date]'),function(r){return r.dataset.date||'';}).filter(Boolean).sort();
+              var firstD=allDates[0]||'0000',lastD=allDates[allDates.length-1]||'9999';
+              var nowY=+lastD.slice(0,4),nowM=+lastD.slice(5,7)-1,firstY=+firstD.slice(0,4),firstM=+firstD.slice(5,7)-1;
+              function mName(y,m){return MONTHS[m]+' '+y;}
+              if(zy){nav.innerHTML=(zy>firstY?'<a href="#" data-go="prev">‹ '+(zy-1)+'</a>':'')+'<a href="#" data-go="up">'+L('All years','Alle jaren')+'</a>'
+                  +(zy<nowY?'<a href="#" data-go="next">'+(zy+1)+' ›</a>':'');}
+              else if(zm){var pm=zm[1]?[zm[0],zm[1]-1]:[zm[0]-1,11],nm=zm[1]<11?[zm[0],zm[1]+1]:[zm[0]+1,0];
+                nav.innerHTML=(pm[0]*12+pm[1]>=firstY*12+firstM?'<a href="#" data-go="prev">‹ '+mName(pm[0],pm[1])+'</a>':'')+'<a href="#" data-go="up">'+L('All of ','Heel ')+zm[0]+'</a>'
+                  +(nm[0]*12+nm[1]<=nowY*12+nowM?'<a href="#" data-go="next">'+mName(nm[0],nm[1])+' ›</a>':'');}
+              else nav.innerHTML='';
+              nav.hidden=!(zy||zm);
+              nav.querySelectorAll('a').forEach(function(x){x.onclick=function(){var g=x.dataset.go;
+                if(zy){if(g==='up'){F.from.value='';F.to.value='';}else{var y=zy+(g==='next'?1:-1);F.from.value=y+'-01-01';F.to.value=y+'-12-31';}}
+                else{if(g==='up'){F.from.value=zm[0]+'-01-01';F.to.value=zm[0]+'-12-31';}
+                  else{var t=g==='next'?nm:pm,e=new Date(Date.UTC(t[0],t[1]+1,0));F.from.value=t[0]+'-'+String(t[1]+1).padStart(2,'0')+'-01';F.to.value=iso(e);}}
+                filterRows();return false;};});
               var lg=document.getElementById('trendLegend');lg.innerHTML='';
               SERIES.forEach(function(s,i){if(!used[i])return;var e=document.createElement('span');var sw=document.createElement('i');sw.style.background='var(--s'+(i+1)+')';
                 e.appendChild(sw);e.appendChild(document.createTextNode(s[1]+' '+metricStr(used[i])));lg.appendChild(e);});
               // Axis: a round step so there are 3-5 grid lines.
               var step=1;if(max>0){var raw=max/4,p=Math.pow(10,Math.floor(Math.log10(raw)));step=[1,2,2.5,5,10].map(function(f){return f*p;}).find(function(x){return x>=raw;});}
-              var top=max>0?Math.ceil(max/step)*step:1,W=1000,H=240,L=56,R=8,T=10,B=26,pw=W-L-R,ph=H-T-B,bw=pw/keys.length,w=Math.max(1,Math.min(bw*0.72,48));
-              var o=['<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="'+what+' per '+unit+'">'];
-              for(var g=0;g<=top+1e-9;g+=step){var gy=T+ph-g/top*ph;o.push('<line class="grid" x1="'+L+'" x2="'+(W-R)+'" y1="'+gy+'" y2="'+gy+'"/><text class="ax" x="'+(L-6)+'" y="'+(gy+4)+'" text-anchor="end">'+(g%1?g.toFixed(1):fmtInt(g))+'</text>');}
+              var top=max>0?Math.ceil(max/step)*step:1,W=1000,H=240,PL=56,R=8,T=10,B=26,pw=W-PL-R,ph=H-T-B,bw=pw/keys.length,w=Math.max(1,Math.min(bw*0.72,48));
+              var o=['<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="'+what+' per '+unitN+'">'];
+              for(var g=0;g<=top+1e-9;g+=step){var gy=T+ph-g/top*ph;o.push('<line class="grid" x1="'+PL+'" x2="'+(W-R)+'" y1="'+gy+'" y2="'+gy+'"/><text class="ax" x="'+(PL-6)+'" y="'+(gy+4)+'" text-anchor="end">'+(g%1?g.toFixed(1):fmtInt(g))+'</text>');}
               var every=Math.ceil(keys.length/(unit==='year'?20:12));
-              keys.forEach(function(k,i){var x=L+i*bw+(bw-w)/2,y=T+ph,segs=[];
+              keys.forEach(function(k,i){var x=PL+i*bw+(bw-w)/2,y=T+ph,segs=[];
                 for(var s=0;s<6;s++){var v=vals[i][s];if(!v)continue;var hgt=v/top*ph;segs.push([s,y-hgt,hgt]);y-=hgt;}
                 segs.forEach(function(sg,j){var gap=j<segs.length-1&&sg[2]>3?2:0,yy=sg[1]+gap,hh=Math.max(sg[2]-gap,0.5);
                   if(j===segs.length-1&&w>=6&&hh>4){var r=Math.min(4,w/2);
                     o.push('<path fill="var(--s'+(sg[0]+1)+')" d="M'+x+' '+(yy+hh)+'V'+(yy+r)+'Q'+x+' '+yy+' '+(x+r)+' '+yy+'H'+(x+w-r)+'Q'+(x+w)+' '+yy+' '+(x+w)+' '+(yy+r)+'V'+(yy+hh)+'Z"/>');}
                   else o.push('<rect fill="var(--s'+(sg[0]+1)+')" x="'+x+'" y="'+yy+'" width="'+w+'" height="'+hh+'"/>');});
                 if(i%every===0){var lab=unit==='year'?k:unit==='month'?MONTHS[+k.slice(5)-1]+(k.slice(5)==='01'||i===0?' '+k.slice(0,4):''):(+k.slice(8))+(k.slice(8)==='01'||i===0?' '+MONTHS[+k.slice(5,7)-1]:'');
-                  o.push('<text class="ax" x="'+(L+i*bw+bw/2)+'" y="'+(H-8)+'" text-anchor="middle">'+lab+'</text>');}
-                o.push('<rect class="hit" data-i="'+i+'" x="'+(L+i*bw)+'" y="'+T+'" width="'+bw+'" height="'+ph+'" fill="transparent"/>');});
+                  o.push('<text class="ax" x="'+(PL+i*bw+bw/2)+'" y="'+(H-8)+'" text-anchor="middle">'+lab+'</text>');}
+                o.push('<rect class="hit" data-i="'+i+'" x="'+(PL+i*bw)+'" y="'+T+'" width="'+bw+'" height="'+ph+'" fill="transparent"/>');});
               o.push('</svg>');
               var c=document.getElementById('trendChart');c.innerHTML=o.join('');
               var tip=document.getElementById('tip');
-              function name(k){return unit==='year'?k:unit==='month'?MONTHS_FULL[+k.slice(5)-1]+' '+k.slice(0,4):k+' '+['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][utc(k).getUTCDay()];}
+              function name(k){return unit==='year'?k:unit==='month'?MONTHS_FULL[+k.slice(5)-1]+' '+k.slice(0,4):k+' '+WDAYS[utc(k).getUTCDay()];}
               c.querySelectorAll('rect.hit').forEach(function(h){var i=+h.dataset.i,k=keys[i];
                 if(unit!=='day')h.style.cursor='pointer';
                 h.addEventListener('mousemove',function(ev){var t='<b>'+name(k)+' · '+metricStr(totals[i])+'</b>';
@@ -3750,20 +4025,28 @@ public class DescribeGarminFile {
             // ---- calendar: one square per day of a year, coloured by the day's main sport (most time)
             var CAL={year:null,recs:[],to:''},DAY_HREF=null;
             function stepCal(d){CAL.year+=d;renderCalendar(CAL.recs,CAL.to);return false;}
+            function pickCal(y){CAL.year=+y;renderCalendar(CAL.recs,CAL.to);return false;}
             function renderCalendar(recs,to){CAL.recs=recs;CAL.to=to;
               var box=document.getElementById('calendar');if(!recs.length){box.hidden=true;return;}box.hidden=false;
               if(!DAY_HREF){DAY_HREF={};document.querySelectorAll('tr[data-date]').forEach(function(r){var a=r.querySelector('td a');if(a)DAY_HREF[r.dataset.date]=a.getAttribute('href');});}
               var minY=+recs.reduce(function(m,r){return r.date<m?r.date:m;},'9999').slice(0,4),maxY=+recs.reduce(function(m,r){return r.date>m?r.date:m;},'0000').slice(0,4);
               if(CAL.year===null)CAL.year=to?Math.min(+to.slice(0,4),maxY):maxY;
               CAL.year=Math.max(minY,Math.min(maxY,CAL.year));var Y=CAL.year;
-              document.getElementById('calPrev').style.visibility=Y>minY?'':'hidden';document.getElementById('calNext').style.visibility=Y<maxY?'':'hidden';
+              var pv=document.getElementById('calPrev'),nx=document.getElementById('calNext'),sel=document.getElementById('calYear');
+              pv.style.visibility=Y>minY?'':'hidden';nx.style.visibility=Y<maxY?'':'hidden';
+              pv.textContent='‹ '+(Y-1);nx.textContent=(Y+1)+' ›';
+              pv.title=L('Previous year','Vorig jaar');nx.title=L('Next year','Volgend jaar');
+              // The menu lists the years the selection covers (newest first); years without a match are still there, greyed.
+              var has={};recs.forEach(function(r){has[r.date.slice(0,4)]=1;});
+              var opts=[];for(var yy=maxY;yy>=minY;yy--)opts.push('<option value="'+yy+'"'+(has[yy]?'':' style="color:var(--muted)"')+'>'+yy+'</option>');
+              sel.innerHTML=opts.join('');sel.value=String(Y);sel.style.display=maxY>minY?'':'none';
               var byDay={};recs.forEach(function(r){if(+r.date.slice(0,4)!==Y)return;(byDay[r.date]=byDay[r.date]||[]).push(r);});
-              var C=14,G=3,L=30,T=18,jan1=new Date(Date.UTC(Y,0,1)),off=(jan1.getUTCDay()+6)%7,o=[],used=[0,0,0,0,0,0];
-              var days=(Date.UTC(Y+1,0,1)-jan1)/864e5,weeks=Math.ceil((days+off)/7),W=L+weeks*(C+G),H=T+7*(C+G);
-              o.push('<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Activity calendar '+Y+'">');
-              ['Mon','','Wed','','Fri','',''].forEach(function(n,i){if(n)o.push('<text class="ax" x="0" y="'+(T+i*(C+G)+C-3)+'">'+n+'</text>');});
+              var C=14,G=3,PL=30,T=18,jan1=new Date(Date.UTC(Y,0,1)),off=(jan1.getUTCDay()+6)%7,o=[],used=[0,0,0,0,0,0];
+              var days=(Date.UTC(Y+1,0,1)-jan1)/864e5,weeks=Math.ceil((days+off)/7),W=PL+weeks*(C+G),H=T+7*(C+G);
+              o.push('<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="'+L('Activity calendar ','Activiteitenkalender ')+Y+'">');
+              [WDAYS[1],'',WDAYS[3],'',WDAYS[5],'',''].forEach(function(n,i){if(n)o.push('<text class="ax" x="0" y="'+(T+i*(C+G)+C-3)+'">'+n+'</text>');});
               var active=0,streak=0,best=0,run=0;
-              for(var i=0;i<days;i++){var d=new Date(jan1.getTime()+i*864e5),k=iso(d),wk=Math.floor((i+off)/7),wd=(i+off)%7,x=L+wk*(C+G),y=T+wd*(C+G);
+              for(var i=0;i<days;i++){var d=new Date(jan1.getTime()+i*864e5),k=iso(d),wk=Math.floor((i+off)/7),wd=(i+off)%7,x=PL+wk*(C+G),y=T+wd*(C+G);
                 if(d.getUTCDate()===1)o.push('<text class="ax" x="'+x+'" y="'+(T-6)+'">'+MONTHS[d.getUTCMonth()]+'</text>');
                 var list=byDay[k],fill;
                 if(list){var t=[0,0,0,0,0,0];list.forEach(function(r){t[seriesOf(r.group)]+=r.dur||1;});var s=t.indexOf(Math.max.apply(null,t));used[s]++;
@@ -3772,17 +4055,18 @@ public class DescribeGarminFile {
                 o.push('<rect class="day" data-d="'+k+'" x="'+x+'" y="'+y+'" width="'+C+'" height="'+C+'" rx="3" fill="'+fill+'"'+(fill==='transparent'?' stroke="var(--line)"':'')+'/>');}
               o.push('</svg>');
               var c=document.getElementById('calChart');c.innerHTML=o.join('');
-              document.getElementById('calTitle').textContent='Calendar '+Y;
-              document.getElementById('calSub').textContent=active+' active days · longest streak '+best+(best===1?' day':' days')+'. Coloured by the sport with the most time that day; click a day to open it.';
+              document.getElementById('calTitle').textContent=L('Calendar ','Kalender ')+Y;
+              document.getElementById('calSub').textContent=L(active+' active days · longest streak '+best+(best===1?' day':' days')+'. Coloured by the sport with the most time that day; click a day to open it.',
+                active+' actieve dagen · langste reeks '+best+(best===1?' dag':' dagen')+'. Gekleurd volgens de sport met de meeste tijd die dag; klik op een dag om hem te openen.');
               var lg=document.getElementById('calLegend');lg.innerHTML='';
               SERIES.forEach(function(s,i){if(!used[i])return;var e=document.createElement('span'),sw=document.createElement('i');sw.style.background='var(--s'+(i+1)+')';
-                e.appendChild(sw);e.appendChild(document.createTextNode(s[1]+' '+used[i]+(used[i]===1?' day':' days')));lg.appendChild(e);});
-              var e=document.createElement('span'),sw=document.createElement('i');sw.style.background='var(--line)';e.appendChild(sw);e.appendChild(document.createTextNode('nothing that matches'));lg.appendChild(e);
+                e.appendChild(sw);e.appendChild(document.createTextNode(s[1]+' '+used[i]+(used[i]===1?L(' day',' dag'):L(' days',' dagen'))));lg.appendChild(e);});
+              var e=document.createElement('span'),sw=document.createElement('i');sw.style.background='var(--line)';e.appendChild(sw);e.appendChild(document.createTextNode(L('nothing that matches','niets dat overeenkomt')));lg.appendChild(e);
               var tip=document.getElementById('tip');
               c.querySelectorAll('rect.day').forEach(function(r){var k=r.dataset.d;if(DAY_HREF[k])r.style.cursor='pointer';
-                r.addEventListener('mousemove',function(ev){var list=byDay[k],t='<b>'+k+' '+['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][utc(k).getUTCDay()]+'</b>';
+                r.addEventListener('mousemove',function(ev){var list=byDay[k],t='<b>'+k+' '+WDAYS[utc(k).getUTCDay()]+'</b>';
                   if(list)list.forEach(function(x){t+='<br>';var sp=document.createElement('span');sp.textContent=x.a.textContent.trim()+(x.dist>0?' · '+fmtKm(x.dist):'')+(x.dur>0?' · '+fmtDur(x.dur):'');t+=sp.innerHTML;});
-                  else t+='<br>'+(DAY_HREF[k]?'nothing that matches':'no data');
+                  else t+='<br>'+(DAY_HREF[k]?L('nothing that matches','niets dat overeenkomt'):L('no data','geen gegevens'));
                   tip.innerHTML=t;tip.style.display='block';tip.style.left=Math.min(ev.clientX+12,window.innerWidth-tip.offsetWidth-8)+'px';tip.style.top=(ev.clientY-tip.offsetHeight-10)+'px';});
                 r.addEventListener('mouseleave',function(){tip.style.display='none';});
                 r.addEventListener('click',function(){if(DAY_HREF[k])location.href=DAY_HREF[k];});});}
@@ -3792,6 +4076,13 @@ public class DescribeGarminFile {
               b.classList.toggle('on',on);document.getElementById(id).classList.toggle('folded',!on);});}
             function togglePanel(id){OPEN[id]=!OPEN[id];try{localStorage.setItem('garmin-overview-panels',JSON.stringify(OPEN));}catch(e){}showPanels();return false;}
             showPanels();
+            // The day rows are written in English; in Dutch the weekday, "rest day" and the activity tooltips are swapped here.
+            if(LANG==='nl'){var WD={Mon:'ma',Tue:'di',Wed:'wo',Thu:'do',Fri:'vr',Sat:'za',Sun:'zo'};
+              document.querySelectorAll('section.month tbody tr').forEach(function(r){var c=r.cells[1];if(c&&WD[c.textContent])c.textContent=WD[c.textContent];
+                var rd=r.cells[2]&&r.cells[2].querySelector('span.muted');if(rd&&rd.textContent==='rest day')rd.textContent='rustdag';});
+              document.querySelectorAll('a.act[title]').forEach(function(a){var t=a.title,i=t.indexOf(' · '),n=i<0?t:t.slice(0,i);
+                if(SPORT_NL[n])a.title=SPORT_NL[n]+(i<0?'':t.slice(i));});
+              document.querySelectorAll('.dists .corr[title]').forEach(function(x){x.title=x.title.replace('Corrected from the stroke count; Garmin:','Gecorrigeerd uit het aantal slagen; Garmin:').replace('Estimated from swim time and pool pace; Garmin:','Geschat uit zwemtijd en zwembadtempo; Garmin:');});}
             (function(){if(location.hash.length<2){try{localStorage.setItem(window.FILTER_KEY||'garmin-overview-filter','');}catch(e){}filterRows();return;}
               var p=new URLSearchParams(location.hash.slice(1));
               KEYS.forEach(function(k){F[k].value=p.get(k)||'';});
@@ -3819,6 +4110,9 @@ public class DescribeGarminFile {
               document.addEventListener('keydown',function(e){
                 if(e.altKey||e.ctrlKey||e.metaKey||e.shiftKey||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName))return;
                 if(e.key==='ArrowLeft'&&p)location.href=p.href;else if(e.key==='ArrowRight'&&n)location.href=n.href;});})();
+            // The menu's Overview link goes back to the overview's last filter too, like "← Overview".
+            (function(){var a=document.querySelector('.site-nav .site-pages a');if(!a)return;a.dataset.day=THIS_DAY;
+              a.addEventListener('click',function(){window.toOverview(a);});})();
             """;
 
     private static final String JS = """
@@ -3880,18 +4174,19 @@ public class DescribeGarminFile {
                   });
                 });
               });
-              if(window.L){
+              var LF=window.LEAF;
+              if(LF){
                 document.querySelectorAll('.map[data-track]').forEach(function(el){
                   var t=JSON.parse(el.getAttribute('data-track')); if(!t.length) return;
-                  var map=L.map(el,{scrollWheelZoom:false,zoomAnimation:false});
-                  var line=L.polyline(t,{color:'#e5484d',weight:4,opacity:.85}).addTo(map);
+                  var map=LF.map(el,{scrollWheelZoom:false,zoomAnimation:false});
+                  var line=LF.polyline(t,{color:'#e5484d',weight:4,opacity:.85}).addTo(map);
                   map.fitBounds(line.getBounds(),{padding:[20,20],animate:false});
-                  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
-                  L.circleMarker(t[0],{radius:6,color:'#16a34a',fillOpacity:1}).addTo(map).bindTooltip('Start');
-                  L.circleMarker(t[t.length-1],{radius:6,color:'#1d2329',fillOpacity:1}).addTo(map).bindTooltip('Finish');
+                  LF.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
+                  LF.circleMarker(t[0],{radius:6,color:'#16a34a',fillOpacity:1}).addTo(map).bindTooltip('Start');
+                  LF.circleMarker(t[t.length-1],{radius:6,color:'#1d2329',fillOpacity:1}).addTo(map).bindTooltip(window.LANG==='nl'?'Einde':'Finish');
                 });
               } else {
-                document.querySelectorAll('.map').forEach(function(el){el.innerHTML='<p style="padding:12px">Map needs an internet connection (Leaflet + OpenStreetMap).</p>';});
+                document.querySelectorAll('.map').forEach(function(el){el.innerHTML='<p style="padding:12px">'+(window.LANG==='nl'?'De kaart heeft een internetverbinding nodig (Leaflet + OpenStreetMap).':'Map needs an internet connection (Leaflet + OpenStreetMap).')+'</p>';});
               }
             })();
             """;

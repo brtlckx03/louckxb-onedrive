@@ -238,11 +238,7 @@ public class DownloadGarminFiles {
         System.out.printf("Wellness done. ok=%d skipped=%d no-data=%d failed=%d%n", run.wOk, run.wSkip, run.wEmpty, run.wFail);
         System.out.printf("Reports done. written=%d unchanged=%d%n", run.reports, run.reportsKept);
         if (run.reports == 0) DescribeGarminFile.Overview.write();
-        try {
-            Heatmap.write();
-        } catch (Exception e) {
-            System.err.println("Heatmap not updated: " + e.getMessage());
-        }
+        DescribeGarminFile.writePages();
         System.out.println("Overview: " + DOWNLOAD_DIR.resolve("index.html").toAbsolutePath());
     }
 

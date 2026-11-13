@@ -67,6 +67,7 @@ public final class Heatmap {
     static Path write() throws IOException {
         Path dir = DescribeGarminFile.dataDir(DescribeGarminFile.account());
         Files.createDirectories(dir);
+        SportCorrection.dropIfStale(dir.resolve(CACHE_FILE));
         Map<String, Track> cache = readCache(dir.resolve(CACHE_FILE));
         TreeMap<String, Track> tracks = new TreeMap<>();
         int read = 0, failed = 0;
@@ -121,7 +122,8 @@ public final class Heatmap {
                 System.err.println("Heatmap: could not read " + json + ": " + e.getMessage());
             }
         }
-        sport = SportCorrection.sport(sport, km * 1000, secs);
+        Matcher idm = GPX_FILE.matcher(gpx.getFileName().toString());
+        sport = SportCorrection.sport(idm.matches() ? SportCorrection.id(idm.group(2)) : 0, sport, km * 1000, secs);
         String xml = Files.readString(gpx);
         if (sport.isEmpty()) {
             int i = xml.indexOf("<type>"), k = xml.indexOf("</type>");
@@ -223,7 +225,7 @@ public final class Heatmap {
         return b.toString();
     }
 
-    private static void encodeValue(StringBuilder b, long v) {
+    static void encodeValue(StringBuilder b, long v) {
         v = v < 0 ? ~(v << 1) : v << 1;
         while (v >= 0x20) {
             b.append((char) ((0x20 | (v & 0x1f)) + 63));
@@ -323,25 +325,27 @@ public final class Heatmap {
                     .append(jsStr(DescribeGarminFile.Overview.sportName(g))).append(',').append(jsStr(DescribeGarminFile.sportIcon(g))).append(']');
         }
         names.append('}');
+        String updated = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").format(LocalDateTime.now());
         return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
                 + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" + DescribeGarminFile.favicon("#ea580c")
-                + "<title>Heatmap · " + esc(label) + "</title>"
+                + "<title>Heatmap · " + esc(label) + "</title>" + Site.HEAD
                 + "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">"
                 + "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>"
                 + "<style>" + DescribeGarminFile.CSS + PAGE_CSS + "</style></head><body>"
-                + "<header class=\"hm\"><div class=\"hm-top\"><div><div class=\"eyebrow\">Garmin heatmap · " + esc(label) + "</div>"
-                + "<h1>Heatmap</h1></div><nav class=\"hm-nav\"><a class=\"home\" href=\"index.html\">← Overview</a></nav></div>"
+                + "<header class=\"hm\">" + Site.nav(PAGE_FILE, 0) + "<div class=\"hm-top\"><div><div class=\"eyebrow\" data-nl=\"Garmin-heatmap · " + esc(label) + "\">Garmin heatmap · " + esc(label) + "</div>"
+                + "<h1>Heatmap</h1></div></div>"
                 + "<div class=\"filters\"><span class=\"ranges\" id=\"groups\"></span></div>"
-                + "<div class=\"filters\"><label>From <input id=\"dfrom\" type=\"date\" onchange=\"changed()\"></label>"
-                + "<label>to <input id=\"dto\" type=\"date\" onchange=\"changed()\"></label><span class=\"ranges\" id=\"ranges\">"
-                + "<a href=\"#\" data-range=\"all\">All time</a><a href=\"#\" data-range=\"12\">Last 12 months</a>"
-                + "<a href=\"#\" data-range=\"year\">This year</a><a href=\"#\" data-range=\"lastyear\">Last year</a></span>"
-                + "<span class=\"ranges\" id=\"modes\"><a href=\"#\" data-mode=\"heat\">🔥 Heat</a><a href=\"#\" data-mode=\"count\">🎨 Times visited</a></span>"
-                + "<label id=\"alphaLabel\">Intensity <input id=\"alpha\" type=\"range\" min=\"1\" max=\"20\" value=\"6\" oninput=\"saveAndDraw()\"></label>"
-                + "<span class=\"ranges\" id=\"bases\"><a href=\"#\" data-base=\"dark\">Dark map</a><a href=\"#\" data-base=\"light\">Light map</a></span>"
+                + "<div class=\"filters\"><label><span data-nl=\"Van\">From</span> <input id=\"dfrom\" type=\"date\" onchange=\"changed()\"></label>"
+                + "<label><span data-nl=\"tot\">to</span> <input id=\"dto\" type=\"date\" onchange=\"changed()\"></label><span class=\"ranges\" id=\"ranges\">"
+                + "<a href=\"#\" data-range=\"all\" data-nl=\"Altijd\">All time</a><a href=\"#\" data-range=\"12\" data-nl=\"Laatste 12 maanden\">Last 12 months</a>"
+                + "<a href=\"#\" data-range=\"year\" data-nl=\"Dit jaar\">This year</a><a href=\"#\" data-range=\"lastyear\" data-nl=\"Vorig jaar\">Last year</a></span>"
+                + "<span class=\"ranges\" id=\"modes\"><a href=\"#\" data-mode=\"heat\" data-nl=\"🔥 Hitte\">🔥 Heat</a><a href=\"#\" data-mode=\"count\" data-nl=\"🎨 Aantal keer\">🎨 Times visited</a></span>"
+                + "<label id=\"alphaLabel\"><span data-nl=\"Intensiteit\">Intensity</span> <input id=\"alpha\" type=\"range\" min=\"1\" max=\"20\" value=\"6\" oninput=\"saveAndDraw()\"></label>"
+                + "<span class=\"ranges\" id=\"bases\"><a href=\"#\" data-base=\"dark\" data-nl=\"Donkere kaart\">Dark map</a><a href=\"#\" data-base=\"light\" data-nl=\"Lichte kaart\">Light map</a></span>"
                 + "<span id=\"filterStatus\"></span></div><div class=\"legend\" id=\"countLegend\" hidden></div></header>"
                 + "<div id=\"map\"></div>"
-                + "<p class=\"hm-foot\">Updated " + DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").format(LocalDateTime.now())
+                + "<p class=\"hm-foot\" data-nl=\"Bijgewerkt " + updated + " uit de GPX-bestanden · klik op de kaart voor de activiteiten die daar langskwamen; "
+                + "uitgezoomd een stip per plaats (klik om in te zoomen) · activiteiten zonder GPS (binnen, zwembad) staan niet op de kaart.\">Updated " + updated
                 + " from the GPX files · click the map to list the activities that passed there; zoomed out, a dot per place (click to zoom in) · "
                 + "activities without GPS (indoor, pool swims) are not on the map.</p>"
                 + "<script src=\"" + DATA_FILE + "\"></script><script>var NAMES=" + names + ",STORE="
@@ -354,7 +358,7 @@ public final class Heatmap {
             header.hm{padding:12px 16px 4px;margin:0}
             .hm-top{display:flex;justify-content:space-between;align-items:flex-end;gap:12px}
             .hm-top h1{font-size:24px;margin:0 0 6px}
-            .hm-nav a{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 12px;color:var(--accent);text-decoration:none;font-size:14px;font-weight:600}
+            header.hm .site-nav{margin:0 -9px 6px;padding-bottom:6px;border-bottom:1px solid var(--line)}
             header.hm .filters{margin:2px 0 6px}
             .ranges a .c{color:var(--muted);font-weight:400;margin-left:4px;font-variant-numeric:tabular-nums}
             .ranges a.off{opacity:.45}
@@ -413,8 +417,10 @@ public final class Heatmap {
             var groups=Object.keys(counts).sort(function(a,b){return (a=='others')-(b=='others')||counts[b]-counts[a]||(a<b?-1:1)});
             // Open-water GPS is poor and virtual rides have made-up coordinates, so both start switched off.
             if(!ST.off)ST.off=['swimming','indoor_cycling'];
-            function groupName(g){return NAMES[g]?NAMES[g][1]+' '+NAMES[g][0]:g}
-            document.getElementById('groups').innerHTML='<a href="#" data-g="*">All</a>'+groups.map(function(g){
+            var NL_GROUPS={cycling:'Fietsen',indoor_cycling:'Binnen fietsen',others:'Overige',rowing_and_paddling:'Roeien en peddelen',running:'Hardlopen',
+              swimming:'Zwemmen',walking:'Wandelen',hiking:'Wandeltochten'};
+            function groupName(g){return NAMES[g]?NAMES[g][1]+' '+L(NAMES[g][0],NL_GROUPS[g]):g}
+            document.getElementById('groups').innerHTML='<a href="#" data-g="*">'+L('All','Alles')+'</a>'+groups.map(function(g){
               return '<a href="#" data-g="'+esc(g)+'">'+esc(groupName(g))+'<span class="c">'+fmtInt(counts[g])+'</span></a>'}).join('');
             document.getElementById('groups').onclick=function(e){
               var a=e.target.closest('a');if(!a)return;e.preventDefault();var g=a.dataset.g;
@@ -443,12 +449,13 @@ public final class Heatmap {
               document.querySelectorAll('#ranges a').forEach(function(a){var v=rangeOf(a.dataset.range);
                 a.classList.toggle('on',v[0]==dfrom.value&&v[1]==dto.value)});
               var n=0,km=0,s=0;ACTS.forEach(function(a){if(shown(a)){n++;km+=a.km;s+=a.secs}});
-              document.getElementById('filterStatus').textContent=fmtInt(n)+' activities · '+fmtInt(km)+' km · '+fmtDur(s);
+              document.getElementById('filterStatus').textContent=fmtInt(n)+L(' activities · ',' activiteiten · ')+fmtInt(km)+' km · '+fmtDur(s);
               if(ST.mode=='count')countPasses();legend();draw();
             }
             function saveAndDraw(){ST.alpha=alpha.value;store();draw()}
             // ---- "times visited": how many activities passed through each cell of about 25 m (one count per activity)
-            var CLASSES=[[1,'once','#4f6df5'],[2,'2–9 times','#20c0b0'],[10,'10–99 times','#c8d62a'],[100,'100–999 times','#ff7a1f'],[1000,'1000 times or more','#d6307e']];
+            var CLASSES=[[1,L('once','één keer'),'#4f6df5'],[2,L('2–9 times','2–9 keer'),'#20c0b0'],[10,L('10–99 times','10–99 keer'),'#c8d62a'],
+              [100,L('100–999 times','100–999 keer'),'#ff7a1f'],[1000,L('1000 times or more','1000 keer of meer'),'#d6307e']];
             function classOf(n){for(var c=CLASSES.length-1;c>0;c--)if(n>=CLASSES[c][0])return c;return 0}
             var CELL=1048576,countKey=null;
             function filterKey(){return JSON.stringify([ST.off,dfrom.value,dto.value])}
@@ -477,7 +484,7 @@ public final class Heatmap {
               document.getElementById('alphaLabel').style.display=on?'none':'';
               document.querySelectorAll('#modes a').forEach(function(a){a.classList.toggle('on',a.dataset.mode==(on?'count':'heat'))});
               if(!on)return;
-              el.innerHTML='Passed:'+CLASSES.map(function(c,i){
+              el.innerHTML=L('Passed:','Gepasseerd:')+CLASSES.map(function(c,i){
                 return '<span><i style="background:'+c[2]+';height:'+(2+i)+'px"></i>'+c[1]+'</span>'}).join('');
             }
             document.getElementById('modes').onclick=function(e){
@@ -601,9 +608,9 @@ public final class Heatmap {
             },true);
             var Nav=L.Control.extend({options:{position:'topleft'},onAdd:function(){
               var d=L.DomUtil.create('div','leaflet-bar hm-ctl');
-              d.innerHTML='<a href="#" id="hmAll" title="Show all places">🌍</a><a href="#" id="hmEu" title="Europe">🇪🇺</a>'
-                +'<a href="#" id="hmBe" title="Belgium">🇧🇪</a><a href="#" id="hmSel" title="Select an area to zoom in (or Shift+drag)">⬚</a>'
-                +'<a href="#" id="hmBack" title="Back (Esc)" hidden>←</a><a href="#" id="hmFwd" title="Forward" hidden>→</a>';
+              d.innerHTML='<a href="#" id="hmAll" title="'+L('Show all places','Toon alle plaatsen')+'">🌍</a><a href="#" id="hmEu" title="Europa">🇪🇺</a>'
+                +'<a href="#" id="hmBe" title="'+L('Belgium','België')+'">🇧🇪</a><a href="#" id="hmSel" title="'+L('Select an area to zoom in (or Shift+drag)','Kies een gebied om in te zoomen (of Shift+slepen)')+'">⬚</a>'
+                +'<a href="#" id="hmBack" title="'+L('Back (Esc)','Terug (Esc)')+'" hidden>←</a><a href="#" id="hmFwd" title="'+L('Forward','Vooruit')+'" hidden>→</a>';
               L.DomEvent.disableClickPropagation(d);
               function on(id,f){d.querySelector('#'+id).onclick=function(e){e.preventDefault();f()}}
               on('hmAll',showAll);on('hmEu',function(){jump(REGIONS.eu)});on('hmBe',function(){jump(REGIONS.be)});
@@ -647,9 +654,9 @@ public final class Heatmap {
               });
               if(!hits.length)return;
               hits.reverse();
-              var h='<div class="hm-pop"><b>'+hits.length+(hits.length==1?' activity':' activities')+' passed here</b>'+hits.slice(0,200).map(function(a){
+              var h='<div class="hm-pop"><b>'+hits.length+(hits.length==1?L(' activity passed here',' activiteit kwam hier langs'):L(' activities passed here',' activiteiten kwamen hier langs'))+'</b>'+hits.slice(0,200).map(function(a){
                 return '<a href="'+href(a.date)+(a.id?'#a'+a.id:'')+'">'+a.date+' '+esc(a.time)+' · '+esc(a.name||a.sport)+' <span>'+a.km.toFixed(1)+' km</span></a>'}).join('')
-                +(hits.length>200?'<span>… and '+(hits.length-200)+' more</span>':'')+'</div>';
+                +(hits.length>200?'<span>'+L('… and ','… en nog ')+(hits.length-200)+L(' more','')+'</span>':'')+'</div>';
               L.popup({maxWidth:360}).setLatLng(e.latlng).setContent(h).openOn(map);
             });
             function segDist(px,py,ax,ay,bx,by){var dx=bx-ax,dy=by-ay,l=dx*dx+dy*dy,t=l?Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/l)):0;
