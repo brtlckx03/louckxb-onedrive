@@ -230,7 +230,7 @@ public final class Segments {
         String sport = SportCorrection.sport(SportCorrection.id(id), type, metres, secs);
         // Treadmill runs and virtual rides have no real road under them.
         // The same activities as the records and best efforts (no treadmill runs, no fake runs).
-        String cls = DescribeGarminFile.Overview.recordKind(sport, date, time);
+        String cls = SportCorrection.noRecord(SportCorrection.id(id)) ? "" : DescribeGarminFile.Overview.recordKind(sport, date, time);
         name = name.replaceAll("[\\t\\r\\n]+", " ").trim();
         if (cls.isEmpty()) return new Entry(mtime, cls, date, id, time, name, "");
         return new Entry(mtime, cls, date, id, time, name, encodeTrack(Files.readAllBytes(gpx)));

@@ -147,7 +147,7 @@ public final class BestEfforts {
         double metres = numOr(at(j, "summaryDTO", "distance"), 0), secs = numOr(at(j, "summaryDTO", "duration"), 0);
         String sport = SportCorrection.sport(SportCorrection.id(id), type, metres, secs);
         // Treadmill runs and the fake runs of NOT_A_RECORD set no best efforts.
-        String kind = DescribeGarminFile.Overview.recordKind(sport, date, start);
+        String kind = SportCorrection.noRecord(SportCorrection.id(id)) ? "" : DescribeGarminFile.Overview.recordKind(sport, date, start);
         // A short "run" at over 18 km/h on average was a ride (SportCorrection only looks at 5 km and more).
         if (kind.equals("run") && secs > 0 && metres / secs * 3.6 > SHORT_RIDE_KMH) kind = "";
         double[] dists = kind.equals("run") ? RUN : kind.equals("ride") ? RIDE : new double[0];

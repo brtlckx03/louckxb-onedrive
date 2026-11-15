@@ -33,6 +33,11 @@ import static net.lckx.garmin.DescribeGarminFile.jsStr;
  */
 public final class Heatmap {
     static final String PAGE_FILE = "heatmap.html";
+
+    /** The page's localStorage key for this account; "…-selection" holds what the overview's "on the map" link sent. */
+    static String storeKey() {
+        return "garmin-heatmap" + (DescribeGarminFile.account().equals(DescribeGarminFile.MAIN_ACCOUNT) ? "" : "-" + DescribeGarminFile.account());
+    }
     private static final String DATA_FILE = "heatmap-data.js";
     private static final String CACHE_FILE = "heatmap-cache.tsv";
     /** Bump when the simplification changes, so every track is read again. */
@@ -321,8 +326,8 @@ public final class Heatmap {
                 + "<header class=\"hm\">" + Site.nav(PAGE_FILE, 0) + "<div class=\"hm-top\"><div><div class=\"eyebrow\" data-nl=\"Garmin-heatmap · " + esc(label) + "\">Garmin heatmap · " + esc(label) + "</div>"
                 + "<h1>Heatmap</h1></div></div>"
                 + "<div class=\"filters\"><span class=\"ranges\" id=\"groups\"></span></div>"
-                + "<div class=\"filters\"><label><span data-nl=\"Van\">From</span> <input id=\"dfrom\" type=\"date\" onchange=\"changed()\"></label>"
-                + "<label><span data-nl=\"tot\">to</span> <input id=\"dto\" type=\"date\" onchange=\"changed()\"></label><span class=\"ranges\" id=\"ranges\">"
+                + "<div class=\"filters\"><label><span data-nl=\"Van\">From</span> <input id=\"dfrom\" type=\"date\" onchange=\"clearSel();changed()\"></label>"
+                + "<label><span data-nl=\"tot\">to</span> <input id=\"dto\" type=\"date\" onchange=\"clearSel();changed()\"></label><span class=\"ranges\" id=\"ranges\">"
                 + "<a href=\"#\" data-range=\"all\" data-nl=\"Altijd\">All time</a><a href=\"#\" data-range=\"12\" data-nl=\"Laatste 12 maanden\">Last 12 months</a>"
                 + "<a href=\"#\" data-range=\"year\" data-nl=\"Dit jaar\">This year</a><a href=\"#\" data-range=\"lastyear\" data-nl=\"Vorig jaar\">Last year</a></span>"
                 + "<span class=\"ranges\" id=\"modes\"><a href=\"#\" data-mode=\"heat\" data-nl=\"🔥 Hitte\">🔥 Heat</a><a href=\"#\" data-mode=\"count\" data-nl=\"🎨 Aantal keer\">🎨 Times visited</a></span>"
@@ -335,7 +340,7 @@ public final class Heatmap {
                 + " from the GPX files · click the map to list the activities that passed there; zoomed out, a dot per place (click to zoom in) · "
                 + "activities without GPS (indoor, pool swims) are not on the map.</p>"
                 + "<script src=\"" + DATA_FILE + "\"></script><script>var NAMES=" + names + ",STORE="
-                + jsStr("garmin-heatmap" + (DescribeGarminFile.account().equals(DescribeGarminFile.MAIN_ACCOUNT) ? "" : "-" + DescribeGarminFile.account()))
+                + jsStr(storeKey())
                 + ";" + PAGE_JS + "</script></body></html>";
     }
 
@@ -371,6 +376,13 @@ public final class Heatmap {
             var ACTS=[],map,canvas,ctx,base,frame=0,ST={};
             try{ST=JSON.parse(localStorage.getItem(STORE)||'{}')||{}}catch(e){ST={}}
             function store(){try{localStorage.setItem(STORE,JSON.stringify(ST))}catch(e){}}
+            // A selection sent by the overview's "🗺 on the map" link (its filtered activities, as "date time"): only those
+            // are shown, whatever the buttons say, until it is cleared (✕, or a sport or date button here).
+            var SEL=null;
+            if(location.hash=='#selection'){ST.sel=1;ST.selFit=1;try{history.replaceState(null,'',location.pathname+location.search)}catch(e){}}
+            if(ST.sel){try{var sl=JSON.parse(localStorage.getItem(STORE+'-selection')||'null');
+              if(sl&&sl.keys)SEL={set:new Set(sl.keys),n:sl.keys.length,label:sl.label||'',t:sl.t}}catch(e){}if(!SEL)ST.sel=0;}
+            function clearSel(){if(!SEL)return;SEL=null;ST.sel=0;ST.selFit=0;store()}
             // Polyline → Web Mercator coordinates in 0..1, with the bounding box for skipping what is off screen.
             function decode(s){
               var pts=[],i=0,lat=0,lon=0;
@@ -408,6 +420,7 @@ public final class Heatmap {
               return '<a href="#" data-g="'+esc(g)+'">'+esc(groupName(g))+'<span class="c">'+fmtInt(counts[g])+'</span></a>'}).join('');
             document.getElementById('groups').onclick=function(e){
               var a=e.target.closest('a');if(!a)return;e.preventDefault();var g=a.dataset.g;
+              if(SEL){clearSel();changed();if(g=='*')return}
               if(g=='*')ST.off=ST.off.length?[]:groups.slice();
               else if(e.altKey||e.metaKey)ST.off=groups.filter(function(x){return x!=g});
               else ST.off=ST.off.indexOf(g)>=0?ST.off.filter(function(x){return x!=g}):ST.off.concat([g]);
@@ -418,7 +431,7 @@ public final class Heatmap {
               if(r=='12'){var f=new Date(t);f.setFullYear(y-1);f.setDate(f.getDate()+1);return [iso(f),iso(t)]}
               if(r=='year')return [y+'-01-01',iso(t)];if(r=='lastyear')return [(y-1)+'-01-01',(y-1)+'-12-31'];return ['',''];}
             document.getElementById('ranges').onclick=function(e){
-              var a=e.target.closest('a');if(!a)return;e.preventDefault();var v=rangeOf(a.dataset.range);
+              var a=e.target.closest('a');if(!a)return;e.preventDefault();clearSel();var v=rangeOf(a.dataset.range);
               dfrom.value=v[0];dto.value=v[1];changed();
             };
             document.getElementById('bases').onclick=function(e){
@@ -426,14 +439,19 @@ public final class Heatmap {
             };
             var dfrom=document.getElementById('dfrom'),dto=document.getElementById('dto'),alpha=document.getElementById('alpha');
             dfrom.value=ST.from||'';dto.value=ST.to||'';if(ST.alpha)alpha.value=ST.alpha;
-            function shown(a){return ST.off.indexOf(a.group)<0&&(!dfrom.value||a.date>=dfrom.value)&&(!dto.value||a.date<=dto.value)}
+            function shown(a){if(SEL)return SEL.set.has(a.date+' '+a.time);return ST.off.indexOf(a.group)<0&&(!dfrom.value||a.date>=dfrom.value)&&(!dto.value||a.date<=dto.value)}
             function changed(){ST.from=dfrom.value;ST.to=dto.value;store();
               document.querySelectorAll('#groups a').forEach(function(a){var g=a.dataset.g;
-                a.classList.toggle('on',g=='*'?!ST.off.length:ST.off.indexOf(g)<0);a.classList.toggle('off',g!='*'&&ST.off.indexOf(g)>=0)});
+                a.classList.toggle('on',!SEL&&(g=='*'?!ST.off.length:ST.off.indexOf(g)<0));a.classList.toggle('off',!!SEL||(g!='*'&&ST.off.indexOf(g)>=0))});
               document.querySelectorAll('#ranges a').forEach(function(a){var v=rangeOf(a.dataset.range);
-                a.classList.toggle('on',v[0]==dfrom.value&&v[1]==dto.value)});
+                a.classList.toggle('on',!SEL&&v[0]==dfrom.value&&v[1]==dto.value)});
               var n=0,km=0,s=0;ACTS.forEach(function(a){if(shown(a)){n++;km+=a.km;s+=a.secs}});
-              document.getElementById('filterStatus').textContent=fmtInt(n)+L(' activities · ',' activiteiten · ')+fmtInt(km)+' km · '+fmtDur(s);
+              var st=document.getElementById('filterStatus'),txt=fmtInt(n)+L(' activities · ',' activiteiten · ')+fmtInt(km)+' km · '+fmtDur(s);
+              if(!SEL)st.textContent=txt;
+              else{st.innerHTML='<b>'+esc(L('Selection from the overview','Selectie uit het overzicht'))+'</b>: '+esc(txt)
+                +(SEL.n>n?esc(L(' · '+(SEL.n-n)+' without GPS not on the map',' · '+(SEL.n-n)+' zonder GPS niet op de kaart')):'')
+                +' <a href="#" id="selClear">'+esc(L('✕ all activities','✕ alle activiteiten'))+'</a>';
+                document.getElementById('selClear').onclick=function(e){e.preventDefault();clearSel();changed()}}
               if(ST.mode=='count')countPasses();legend();draw();
             }
             function saveAndDraw(){ST.alpha=alpha.value;store();draw()}
@@ -442,7 +460,7 @@ public final class Heatmap {
               [100,L('100–999 times','100–999 keer'),'#ff7a1f'],[1000,L('1000 times or more','1000 keer of meer'),'#d6307e']];
             function classOf(n){for(var c=CLASSES.length-1;c>0;c--)if(n>=CLASSES[c][0])return c;return 0}
             var CELL=1048576,countKey=null;
-            function filterKey(){return JSON.stringify([ST.off,dfrom.value,dto.value])}
+            function filterKey(){return JSON.stringify(SEL?['sel',SEL.t,SEL.n]:[ST.off,dfrom.value,dto.value])}
             function cellKey(x,y){return Math.floor(x)*4194304+Math.floor(y)}
             // Calls f(x,y) every half cell along the line, so no cell it crosses is missed.
             function walk(xy,i,f){
@@ -513,8 +531,10 @@ public final class Heatmap {
               // First every route once, as one path (one stroke does not add up with itself): a route done once is
               // always visible, also far from home where nothing overlaps it.
               ctx.globalCompositeOperation='source-over';
-              ctx.strokeStyle=dark?'rgba(255,72,24,.45)':'rgba(205,30,20,.4)';
+              // Wider than the heat lines, so a lone route stands out from the roads on the map.
+              var lw=ctx.lineWidth;ctx.lineWidth=lw+1.5;ctx.strokeStyle=dark?'rgba(255,72,24,.5)':'rgba(205,30,20,.5)';
               ctx.beginPath();var anyBase=false;acts.forEach(function(act){if(trace(act))anyBase=true});if(anyBase)ctx.stroke();
+              ctx.lineWidth=lw;
               ctx.globalCompositeOperation=dark?'lighter':'source-over';
               // Then the heat: overlapping lines add up, so often-used streets go orange, yellow, then white.
               ctx.strokeStyle=dark?'rgba(255,72,24,'+a+')':'rgba(205,30,20,'+Math.min(1,a*.35)+')';
@@ -659,6 +679,10 @@ public final class Heatmap {
             }
             setBase();
             if(ST.view)map.setView([ST.view[0],ST.view[1]],ST.view[2]);else{var h0=home();map.setView(h0[0],h0[1])}
+            // A new selection: zoom to all of it once.
+            if(SEL&&ST.selFit){var x0=1,y0=1,x1=0,y1=0;
+              ACTS.forEach(function(a){if(shown(a))a.lines.forEach(function(l){var b=l.b;x0=Math.min(x0,b[0]);y0=Math.min(y0,b[1]);x1=Math.max(x1,b[2]);y1=Math.max(y1,b[3])})});
+              if(x1>=x0)map.fitBounds([ll(x0,y1),ll(x1,y0)],{padding:[30,30],maxZoom:14});ST.selFit=0;store()}
             map.on('moveend',function(){var c=map.getCenter();ST.view=[+c.lat.toFixed(5),+c.lng.toFixed(5),map.getZoom()];store()});
             changed();
             """;

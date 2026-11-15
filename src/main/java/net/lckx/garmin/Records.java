@@ -27,7 +27,8 @@ final class Records {
             for (Object o : DescribeGarminFile.Overview.shown(e.summary())) {
                 String sport = str(at(o, "sport"));
                 Double d = DescribeGarminFile.Overview.distanceOf(o), dur = num(at(o, "duration"));
-                boolean norec = DescribeGarminFile.Overview.notARecord(sport, e.date().toString(), str(at(o, "start")));
+                boolean norec = DescribeGarminFile.Overview.notARecord(sport, e.date().toString(), str(at(o, "start")))
+                        || Boolean.TRUE.equals(at(o, "norecord"));
                 if (n++ > 0) data.append(',');
                 data.append('[').append(jsStr(e.date().toString())).append(',')
                         .append(jsStr(e.href() + "#act" + DescribeGarminFile.Overview.sectionOf(e.summary(), o))).append(',')

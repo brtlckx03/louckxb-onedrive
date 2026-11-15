@@ -411,6 +411,8 @@ public class DescribeGarminFile {
         String garminSport = "", sportReason;
         /** The other recording of the same outing that counts instead of this one ({@link Duplicates}), or null. */
         Long duplicateOf;
+        /** Why it sets no record ({@link SportCorrection#NO_RECORD}), or null. */
+        String noRecordReason;
         /** Corrected pool-swim distance (its own file next to the data), or null. */
         SwimCorrection.Result correction;
         /** Open-water swims: distance estimated from swim time and pool pace, since GPS loses its fix under water. */
@@ -472,6 +474,7 @@ public class DescribeGarminFile {
             a.correction = SwimCorrection.update(a).orElse(null);
             a.openWater = OpenWaterCorrection.correct(a);
             a.duplicateOf = Overview.HIDDEN_SPORTS.contains(a.sport) ? null : Duplicates.keptFor(f.id());
+            a.noRecordReason = SportCorrection.noRecordReason(f.id());
             return a;
         }
 
@@ -516,6 +519,7 @@ public class DescribeGarminFile {
                 j.append("{\"name\":\"").append(jsonEscape(a.title())).append("\",\"sport\":\"").append(jsonEscape(a.sport))
                         .append("\",\"start\":\"").append(a.start == null ? "" : HM.format(a.start.atZone(a.zone))).append('"');
                 if (a.duplicateOf != null) j.append(",\"duplicate\":true");
+                if (a.noRecordReason != null) j.append(",\"norecord\":true");
                 Map<Integer, Double> sb = SwimBests.of(a);
                 if (!sb.isEmpty()) {
                     j.append(",\"swimBests\":{");
@@ -576,7 +580,7 @@ public class DescribeGarminFile {
             String base = overviewHref.replace('\\', '/');
             base = base.contains("/") ? base.substring(0, base.lastIndexOf('/') + 1) : "";
             h.append("</main><div id=\"tip\"></div><script src=\"").append(esc(base)).append(DAYS_FILE).append("\"></script>")
-                    .append("<script>var FILTER_KEY=").append(jsStr(filterKey())).append(",DAY_BASE=").append(jsStr(base)).append(",THIS_DAY=\"").append(day.date).append("\";")
+                    .append("<script>var FILTER_KEY=").append(jsStr(filterKey())).append(",DAY_BASE=").append(jsStr(base)).append(",THIS_DAY=\"").append(day.date).append("\",SITE_PAGES=").append(Site.pagesJs()).append(";")
                     .append(DAY_STEP_JS).append(JS).append("</script></body></html>");
             return localize(h.toString());
         }
@@ -686,6 +690,8 @@ public class DescribeGarminFile {
         void nav() {
             // Sticky bar: back to the overview, plus jumps within the page when there is more than one section.
             h.append("<nav><a class=\"home\" href=\"").append(esc(overviewHref.replace('\\', '/'))).append("\" data-day=\"").append(day.date).append("\" onclick=\"return toOverview(this)\" data-nl=\"← Overzicht\">← Overview</a>");
+            // "← Heatmap" etc. when the report was opened from that page (filled in by DAY_STEP_JS).
+            h.append("<a class=\"home\" id=\"backTo\" hidden></a>");
             // Filled in from days.js (written with the overview), so they stay right when later days are added.
             h.append("<a class=\"day-step\" id=\"prevDay\" hidden title=\"Previous day with a report (←)\" data-nl-title=\"Vorige dag met een rapport (←)\"></a>")
                     .append("<a class=\"day-step\" id=\"nextDay\" hidden title=\"Next day with a report (→)\" data-nl-title=\"Volgende dag met een rapport (→)\"></a>");
@@ -734,6 +740,9 @@ public class DescribeGarminFile {
                         "Deze tocht is twee keer opgenomen (bv. op het horloge en de fietscomputer); alleen " + other
                                 + " telt, deze wordt nergens meegeteld.")).append("</p>");
             }
+            if (a.noRecordReason != null && !SportCorrection.EXCLUDED.equals(a.sport))
+                h.append("<p class=\"note\">🏁 ").append(t("Counted in the totals, but left out of the records, best efforts and segment times: " + esc(a.noRecordReason) + ".",
+                        "Meegeteld in de totalen, maar niet in de records, beste prestaties en segmenttijden: " + esc(a.noRecordReason) + ".")).append("</p>");
             if (a.sportReason != null && SportCorrection.EXCLUDED.equals(a.sport))
                 h.append("<p class=\"note\">🚫 ").append(t("Not counted anywhere (overview, records, maps, fitness): " + esc(a.sportReason) + ". The downloaded files are unchanged.",
                         "Nergens meegeteld (overzicht, records, kaarten, conditie): " + esc(a.sportReason) + ". De gedownloade bestanden zijn ongewijzigd.")).append("</p>");
@@ -2098,7 +2107,8 @@ public class DescribeGarminFile {
                                     + "(pool swims recounted from the stroke count, open-water swims estimated from swim time; hover for Garmin's value, details in the day report). Reports live in " + dir + ".",
                             "Klik op een kolomkop om te sorteren. Een afstand met ≈ is een gecorrigeerde zwemafstand "
                                     + "(zwembad herteld uit het aantal slagen, open water geschat uit de zwemtijd; ga erover voor de waarde van Garmin, details in het dagrapport). De rapporten staan in " + dir + "."))
-                    .append("</footer></main><div id=\"tip\"></div><script>var FILTER_KEY=").append(jsStr(filterKey())).append(",SPORT_NL=").append(sportNlJs()).append(";").append(JS)
+                    .append("</footer></main><div id=\"tip\"></div><script>var FILTER_KEY=").append(jsStr(filterKey())).append(",MAP_SEL=").append(jsStr(Heatmap.storeKey() + "-selection"))
+                    .append(",MAP_PAGE=").append(jsStr(Heatmap.PAGE_FILE)).append(",SPORT_NL=").append(sportNlJs()).append(";").append(JS)
                     .append(OVERVIEW_JS).append(SUBS_JS)
                     .append("</script></body></html>");
             return localize(h.toString());
@@ -2137,6 +2147,7 @@ public class DescribeGarminFile {
                         .append(esc(sportGroup(str(at(o, "sport"))))).append("\" data-dist=\"")
                         .append(d == null ? 0 : Math.round(d)).append("\" data-kmh=\"").append(Math.round(kmh * 100) / 100.0)
                         .append("\" data-dur=\"").append(dur == null ? 0 : Math.round(dur))
+                        .append("\" data-start=\"").append(esc(str(at(o, "start"))))
                         .append("\" title=\"").append(esc(sportName(str(at(o, "sport")))))
                         .append(kmh > 0 ? " · " + fmtNum(kmh, 1) + " km/h" : "").append("\">")
                         .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name")))).append("</a>");
@@ -3955,6 +3966,11 @@ public class DescribeGarminFile {
               var st=document.getElementById('filterStatus');st.innerHTML='';
               if(any){
                 st.textContent=n+(n===1?L(' activity on ',' activiteit op '):L(' activities on ',' activiteiten op '))+days+(days===1?L(' day',' dag'):L(' days',' dagen'))+(tot>0?' · '+fmtKm(tot):'')+(dur>0?' · '+fmtDur(dur):'')+' ';
+                // The same activities on the heatmap (it shows only those until that selection is cleared there).
+                if(n>0&&window.MAP_SEL){var mp=document.createElement('a');mp.href=MAP_PAGE+'#selection';mp.textContent=L('🗺 on the map','🗺 op de kaart');
+                  mp.onclick=function(){try{localStorage.setItem(MAP_SEL,JSON.stringify({t:Date.now(),label:st.firstChild.textContent.trim(),
+                    keys:recs.map(function(r){return r.date+' '+(r.a.dataset.start||'');})}));}catch(e){}};
+                  st.appendChild(mp);st.appendChild(document.createTextNode(' '));}
                 var x=document.createElement('a');x.href='#';x.textContent=L('✕ clear','✕ wissen');x.onclick=clearFilters;st.appendChild(x);}
               var p=new URLSearchParams();
               if(sp)p.set('sport',sp);['min','max','smin','smax','from','to'].forEach(function(k){if(F[k].value)p.set(k,F[k].value);});
@@ -4136,6 +4152,18 @@ public class DescribeGarminFile {
               document.addEventListener('keydown',function(e){
                 if(e.altKey||e.ctrlKey||e.metaKey||e.shiftKey||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName))return;
                 if(e.key==='ArrowLeft'&&p)location.href=p.href;else if(e.key==='ArrowRight'&&n)location.href=n.href;});})();
+            // "← Heatmap" (or another page) next to "← Overview" when the reports were opened from that page; it stays
+            // while stepping through the days, in this tab. Coming from the overview (or another account) drops it.
+            (function(){var a=document.getElementById('backTo'),P=window.SITE_PAGES,KEY='garmin-back';if(!a||!P)return;
+              var root=location.pathname.replace(/\\d{4}\\/\\d{2}\\/[^\\/]*$/,''),b=null;
+              try{b=JSON.parse(sessionStorage.getItem(KEY)||'null');}catch(e){}
+              try{var u=document.referrer?new URL(document.referrer):null;
+                if(u&&u.origin===location.origin){
+                  var f=u.pathname.slice(0,root.length)===root?u.pathname.slice(root.length).replace(/\\.html$/,''):null;
+                  if(f!==null&&P[f])b={root:root,f:f,href:u.href};else if(f===null||f===''||f==='index')b=null;
+                  sessionStorage.setItem(KEY,JSON.stringify(b));}}catch(e){}
+              if(!b||b.root!==root||!P[b.f])return;
+              a.href=b.href;a.textContent='← '+L(P[b.f][0],P[b.f][1]);a.hidden=false;})();
             // The menu's Overview link goes back to the overview's last filter too, like "← Overview".
             (function(){var a=document.querySelector('.site-nav .site-pages a');if(!a)return;a.dataset.day=THIS_DAY;
               a.addEventListener('click',function(){window.toOverview(a);});})();

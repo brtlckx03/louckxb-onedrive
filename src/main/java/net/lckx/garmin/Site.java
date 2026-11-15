@@ -37,14 +37,34 @@ final class Site {
             {Fitness.PAGE_FILE, "Fitness", "Conditie"},
     };
 
-    /** The menu: every page of this account, the accounts, and the language. */
-    static String nav(String current, int depth) {
-        String up = "../".repeat(depth), me = DescribeGarminFile.account();
+    /** This account's pages, with a "together" page per partner: [file, English, Dutch]. */
+    private static List<String[]> pages() {
         List<String[]> pages = new ArrayList<>(List.of(PAGES));
         for (String p : Together.partners()) {
             String label = DescribeGarminFile.accountLabelOf(p);
             pages.add(new String[]{Together.pageFile(p), "With " + label, "Met " + label});
         }
+        return pages;
+    }
+
+    /**
+     * {@code {"heatmap":["Heatmap","Heatmap"],…}}: the pages other than the overview by file name without ".html",
+     * so a day report can offer the way back to the page it was opened from.
+     */
+    static String pagesJs() {
+        StringBuilder b = new StringBuilder("{");
+        for (String[] p : pages()) {
+            if (p[0].equals("index.html")) continue;
+            if (b.length() > 1) b.append(',');
+            b.append('"').append(p[0].replaceFirst("\\.html$", "")).append("\":[\"").append(p[1]).append("\",\"").append(p[2]).append("\"]");
+        }
+        return b.append('}').toString();
+    }
+
+    /** The menu: every page of this account, the accounts, and the language. */
+    static String nav(String current, int depth) {
+        String up = "../".repeat(depth), me = DescribeGarminFile.account();
+        List<String[]> pages = pages();
         StringBuilder h = new StringBuilder("<nav class=\"site-nav\" aria-label=\"Pages\" data-nl-aria=\"Pagina's\"><div class=\"site-pages\">");
         for (String[] p : pages) {
             boolean on = p[0].equals(current);
