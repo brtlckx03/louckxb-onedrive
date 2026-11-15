@@ -55,7 +55,7 @@ final class Site {
         // The same page for the other account; a day report goes to that account's overview.
         List<String> accounts = new ArrayList<>();
         accounts.add(me);
-        accounts.addAll(Together.partners());
+        for (String p : Together.partners()) if (Files.isDirectory(DescribeGarminFile.dataDir(p))) accounts.add(p);
         accounts.sort(String::compareTo);
         if (accounts.size() > 1) {
             h.append("<span class=\"site-seg\" role=\"group\" aria-label=\"Account\">");
@@ -69,7 +69,6 @@ final class Site {
                     h.append("<a aria-current=\"true\">").append(esc(DescribeGarminFile.accountLabelOf(a))).append("</a>");
                 } else {
                     String dir = DescribeGarminFile.dataDir(a).getFileName().toString();
-                    if (!Files.isDirectory(DescribeGarminFile.dataDir(a))) continue;
                     h.append("<a href=\"").append(up).append("../").append(dir).append('/').append(target).append("\">")
                             .append(esc(DescribeGarminFile.accountLabelOf(a))).append("</a>");
                 }
@@ -124,6 +123,9 @@ final class Site {
               if(window.L&&window.L.map)Object.assign(T,window.L);
               try{Object.defineProperty(window,'L',{configurable:true,get:function(){return T},
                 set:function(v){if(v&&v!==T&&typeof v=='object')Object.assign(T,v)}})}catch(e){window.L=T}
+              // Shared by the page scripts: HTML-escape a value, and a whole number with thin spaces (12 345).
+              window.esc=function(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})};
+              window.fmtInt=function(v){return Math.round(v).toLocaleString('en-US').replace(/,/g,' ')};
               window.setLang=function(x){try{localStorage.setItem('garmin-lang',x)}catch(e){}
                 if(/[?&]lang=/.test(location.search))location.search='';else location.reload()};
               window.applyLang=function(root){root=root||document;

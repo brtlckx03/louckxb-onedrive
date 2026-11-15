@@ -1,10 +1,11 @@
 package net.lckx.garmin;
 
+import static net.lckx.garmin.Util.*;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -75,9 +76,11 @@ public final class Heatmap {
         try (Stream<Path> s = Files.walk(dir)) {
             for (Path p : (Iterable<Path>) s::iterator) {
                 Matcher m = GPX_FILE.matcher(p.getFileName().toString());
-                if (!m.matches()) continue;
+                if (!m.matches() || Duplicates.isOldCopy(p.getFileName().toString())) continue;
                 String key = dir.relativize(p).toString().replace('\\', '/');
-                long mtime = Files.getLastModifiedTime(p).toMillis();
+                // The newest of the GPX and its JSON: the JSON (sport, name, distance) can arrive after the track.
+                Path json = p.resolveSibling(p.getFileName().toString().replaceFirst("\\.gpx$", ".json"));
+                long mtime = Math.max(Files.getLastModifiedTime(p).toMillis(), Files.exists(json) ? Files.getLastModifiedTime(json).toMillis() : 0);
                 Track t = cache.get(key);
                 if (t == null || t.mtime != mtime) {
                     try {
@@ -112,12 +115,12 @@ public final class Heatmap {
         if (Files.exists(json)) {
             try {
                 Map<?, ?> j = (Map<?, ?>) DescribeGarminFile.Json.parse(Files.readString(json));
-                sport = str(get(j, "activityTypeDTO", "typeKey"));
-                name = str(get(j, "activityName"));
-                String start = str(get(j, "summaryDTO", "startTimeLocal"));
+                sport = str(at(j, "activityTypeDTO", "typeKey"));
+                name = str(at(j, "activityName"));
+                String start = str(at(j, "summaryDTO", "startTimeLocal"));
                 if (start.length() >= 16) time = start.substring(11, 16);
-                km = number(get(j, "summaryDTO", "distance")) / 1000;
-                secs = number(get(j, "summaryDTO", "duration"));
+                km = numOr(at(j, "summaryDTO", "distance"), 0) / 1000;
+                secs = numOr(at(j, "summaryDTO", "duration"), 0);
             } catch (Exception e) {
                 System.err.println("Heatmap: could not read " + json + ": " + e.getMessage());
             }
@@ -234,21 +237,8 @@ public final class Heatmap {
         b.append((char) (v + 63));
     }
 
-    private static Object get(Object o, String... path) {
-        for (String k : path) {
-            if (!(o instanceof Map<?, ?> m)) return null;
-            o = m.get(k);
-        }
-        return o;
-    }
 
-    private static String str(Object o) {
-        return o == null ? "" : o.toString();
-    }
 
-    private static double number(Object o) {
-        return o instanceof Number n ? n.doubleValue() : 0;
-    }
 
     // ---- cache ---------------------------------------------------------------------------------------------
 
@@ -295,7 +285,8 @@ public final class Heatmap {
             ids.put(t, m.matches() ? m.group(2) : "");
         });
         List<Track> list = tracks.values().stream()
-                .filter(t -> !t.lines.isEmpty() && !DescribeGarminFile.Overview.HIDDEN_SPORTS.contains(t.sport))
+                .filter(t -> !t.lines.isEmpty() && !DescribeGarminFile.Overview.HIDDEN_SPORTS.contains(t.sport)
+                        && !Duplicates.isDuplicate(ids.get(t)))
                 .sorted((a, b) -> (a.date + a.time).compareTo(b.date + b.time)).toList();
         StringBuilder b = new StringBuilder("window.HEATMAP=[\n");
         for (Track t : list) {
@@ -310,11 +301,6 @@ public final class Heatmap {
         return groups;
     }
 
-    private static void replace(Path f, String content) throws IOException {
-        Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
-        Files.writeString(tmp, content, StandardCharsets.UTF_8);
-        Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-    }
 
     private static String page(Set<String> groups) {
         String label = DescribeGarminFile.accountLabelOf(DescribeGarminFile.account());
@@ -409,15 +395,13 @@ public final class Heatmap {
               ACTS.push({date:r[0],time:r[1],sport:r[2],group:r[3],name:r[4],km:r[5],secs:r[6],lines:r[7].map(decode),id:r[8]});
             });
             function fmtDur(s){var h=Math.floor(s/3600),m=Math.floor(s%3600/60);if(h>=100)return fmtInt(s/3600)+' h';return h?h+':'+String(m).padStart(2,'0')+' h':m+' min'}
-            function fmtInt(v){return Math.round(v).toLocaleString('en-US').replace(/,/g,' ')}
             function href(d){return d.slice(0,4)+'/'+d.slice(5,7)+'/'+d+'-report.html'}
-            function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
             // ---- filters
             var counts={};ACTS.forEach(function(a){counts[a.group]=(counts[a.group]||0)+1});
             var groups=Object.keys(counts).sort(function(a,b){return (a=='others')-(b=='others')||counts[b]-counts[a]||(a<b?-1:1)});
             // Open-water GPS is poor and virtual rides have made-up coordinates, so both start switched off.
             if(!ST.off)ST.off=['swimming','indoor_cycling'];
-            var NL_GROUPS={cycling:'Fietsen',indoor_cycling:'Binnen fietsen',others:'Overige',rowing_and_paddling:'Roeien en peddelen',running:'Hardlopen',
+            var NL_GROUPS={cycling:'Fietsen',indoor_cycling:'Indoor fietsen',others:'Overige',rowing_and_paddling:'Roeien en peddelen',running:'Hardlopen',
               swimming:'Zwemmen',walking:'Wandelen',hiking:'Wandeltochten'};
             function groupName(g){return NAMES[g]?NAMES[g][1]+' '+L(NAMES[g][0],NL_GROUPS[g]):g}
             document.getElementById('groups').innerHTML='<a href="#" data-g="*">'+L('All','Alles')+'</a>'+groups.map(function(g){
@@ -516,22 +500,25 @@ public final class Heatmap {
               var a=alpha.value/40,dark=base=='dark';
               ctx.setTransform(dpr,0,0,dpr,0,0);
               if(ST.mode=='count'){paintCounts(z,scale,o,vx0,vy0,vx1,vy1,dark);paintPlaces(z,scale,o,sz);return}
-              ctx.globalCompositeOperation=dark?'lighter':'source-over';
-              // Overlapping lines add up: few passes stay red, often-used streets go orange, yellow, then white.
-              ctx.strokeStyle=dark?'rgba(255,72,24,'+a+')':'rgba(205,30,20,'+Math.min(1,a*.35)+')';
               ctx.lineWidth=z>=15?2.5:z>=13?2:z>=11?1.5:1;ctx.lineJoin='round';ctx.lineCap='round';
-              var minLen=1/scale;
-              ACTS.forEach(function(act){
-                if(!shown(act))return;
-                ctx.beginPath();var any=false;
+              // Adds one activity's lines in view to the current path; false when none is in view.
+              function trace(act){var any=false;
                 act.lines.forEach(function(l){
                   var b=l.b;if(b[2]<vx0||b[0]>vx1||b[3]<vy0||b[1]>vy1)return;
                   var xy=l.xy,px=xy[0]*scale-o.x,py=xy[1]*scale-o.y;ctx.moveTo(px,py);any=true;
                   for(var i=2;i<xy.length;i+=2){var x=xy[i]*scale-o.x,y=xy[i+1]*scale-o.y;
                     if(Math.abs(x-px)+Math.abs(y-py)<.7&&i<xy.length-2)continue;ctx.lineTo(x,y);px=x;py=y}
-                });
-                if(any)ctx.stroke();
-              });
+                });return any}
+              var acts=ACTS.filter(shown);
+              // First every route once, as one path (one stroke does not add up with itself): a route done once is
+              // always visible, also far from home where nothing overlaps it.
+              ctx.globalCompositeOperation='source-over';
+              ctx.strokeStyle=dark?'rgba(255,72,24,.45)':'rgba(205,30,20,.4)';
+              ctx.beginPath();var anyBase=false;acts.forEach(function(act){if(trace(act))anyBase=true});if(anyBase)ctx.stroke();
+              ctx.globalCompositeOperation=dark?'lighter':'source-over';
+              // Then the heat: overlapping lines add up, so often-used streets go orange, yellow, then white.
+              ctx.strokeStyle=dark?'rgba(255,72,24,'+a+')':'rgba(205,30,20,'+Math.min(1,a*.35)+')';
+              acts.forEach(function(act){ctx.beginPath();if(trace(act))ctx.stroke()});
               paintPlaces(z,scale,o,sz);
             }
             // Zoomed out, a short trip far away is only a few pixels of line; a numbered dot per place shows where

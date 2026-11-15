@@ -1,10 +1,10 @@
 package net.lckx.garmin;
 
+import static net.lckx.garmin.Util.*;
+
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -63,11 +63,11 @@ public final class YearsInMotion {
                     .append(n(s.get("restingHR"))).append(',').append(n(s.get("hrv"))).append(',')
                     .append(n(s.get("sleepScore"))).append(',').append(n(s.get("sleepSeconds"))).append(",[");
             boolean firstAct = true;
-            if (s.get("activities") instanceof List<?> acts) {
-                for (Object o : acts) {
+            {
+                // The activities the overview counts: no hidden sports, no second recordings of the same outing.
+                for (Object o : DescribeGarminFile.Overview.shown(s)) {
                     if (!(o instanceof Map<?, ?> a)) continue;
                     String sport = str(a.get("sport"));
-                    if (DescribeGarminFile.Overview.HIDDEN_SPORTS.contains(sport)) continue;
                     Object dist = a.get("correctedDistance") instanceof Number ? a.get("correctedDistance") : a.get("distance");
                     js.append(firstAct ? "" : ",").append('[').append(jsStr(sport)).append(',')
                             .append(jsStr(DescribeGarminFile.Overview.sportGroup(sport))).append(',')
@@ -98,15 +98,7 @@ public final class YearsInMotion {
         return o instanceof Number num ? Long.toString(Math.round(num.doubleValue())) : "0";
     }
 
-    private static String str(Object o) {
-        return o == null ? "" : o.toString();
-    }
 
-    private static void replace(Path f, String content) throws IOException {
-        Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
-        Files.writeString(tmp, content, StandardCharsets.UTF_8);
-        Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-    }
 
     private static String page() {
         String label = DescribeGarminFile.accountLabelOf(DescribeGarminFile.account());
@@ -285,11 +277,9 @@ public final class YearsInMotion {
             function dayNo(s){return Date.UTC(+s.slice(0,4),+s.slice(5,7)-1,+s.slice(8,10))/864e5}
             function dateOf(n){var d=new Date(Math.floor(n)*864e5);return d}
             function iso(n){return dateOf(n).toISOString().slice(0,10)}
-            function fmtInt(v){return Math.round(v).toLocaleString('en-US').replace(/,/g,' ')}
             function fmtDate(s){return +s.slice(8,10)+' '+MON[+s.slice(5,7)-1]+' '+s.slice(0,4)}
-            function fmtDur(s){var h=Math.floor(s/3600),m=Math.round(s%3600/60);return h?h+' h '+String(m).padStart(2,'0'):m+' min'}
+            function fmtDur(s){var h=Math.floor(s/3600),m=Math.round(s%3600/60);if(m==60){h++;m=0}return h?h+' h '+String(m).padStart(2,'0'):m+' min'}
             function href(d){return d.slice(0,4)+'/'+d.slice(5,7)+'/'+d+'-report.html'}
-            function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
             function rgba(hex,a){var n=parseInt(hex.slice(1),16);return 'rgba('+(n>>16)+','+(n>>8&255)+','+(n&255)+','+a+')'}
             function hourOf(t){var m=/^(\\d+):(\\d+)/.exec(t||'');return m?(+m[1])+(+m[2])/60:12}
             var tip=document.getElementById('tip');

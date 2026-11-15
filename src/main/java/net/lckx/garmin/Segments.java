@@ -1,11 +1,11 @@
 package net.lckx.garmin;
 
+import static net.lckx.garmin.Util.*;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.FileTime;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
@@ -137,7 +137,7 @@ public final class Segments {
         Map<String, Entry> cache = readCache(dir.resolve(CACHE_FILE));
         List<Path> gpx = new ArrayList<>();
         try (Stream<Path> s = Files.walk(dir)) {
-            s.filter(p -> GPX_FILE.matcher(p.getFileName().toString()).matches()).forEach(gpx::add);
+            s.filter(p -> GPX_FILE.matcher(p.getFileName().toString()).matches() && !Duplicates.isOldCopy(p.getFileName().toString())).forEach(gpx::add);
         }
         Map<String, Entry> entries = new ConcurrentHashMap<>();
         AtomicInteger read = new AtomicInteger(), failed = new AtomicInteger();
@@ -164,7 +164,7 @@ public final class Segments {
 
         List<Act> all = new ArrayList<>();
         for (Entry e : sorted.values()) {
-            if (e.cls.isEmpty() || e.track.isEmpty()) continue;
+            if (e.cls.isEmpty() || e.track.isEmpty() || Duplicates.isDuplicate(e.id)) continue;
             Act a = Act.of(e);
             if (a != null) all.add(a);
         }
@@ -220,18 +220,17 @@ public final class Segments {
         Path json = jsonOf(gpx);
         if (Files.exists(json)) {
             Map<?, ?> j = (Map<?, ?>) DescribeGarminFile.Json.parse(Files.readString(json));
-            type = str(get(j, "activityTypeDTO", "typeKey"));
-            name = str(get(j, "activityName"));
-            String start = str(get(j, "summaryDTO", "startTimeLocal"));
+            type = str(at(j, "activityTypeDTO", "typeKey"));
+            name = str(at(j, "activityName"));
+            String start = str(at(j, "summaryDTO", "startTimeLocal"));
             if (start.length() >= 16) time = start.substring(11, 16);
-            metres = number(get(j, "summaryDTO", "distance"));
-            secs = number(get(j, "summaryDTO", "duration"));
+            metres = numOr(at(j, "summaryDTO", "distance"), 0);
+            secs = numOr(at(j, "summaryDTO", "duration"), 0);
         }
         String sport = SportCorrection.sport(SportCorrection.id(id), type, metres, secs);
-        String group = DescribeGarminFile.Overview.sportGroup(sport);
         // Treadmill runs and virtual rides have no real road under them.
-        String cls = group.equals("running") && !sport.equals("treadmill_running") ? "run"
-                : group.equals("cycling") ? "ride" : "";
+        // The same activities as the records and best efforts (no treadmill runs, no fake runs).
+        String cls = DescribeGarminFile.Overview.recordKind(sport, date, time);
         name = name.replaceAll("[\\t\\r\\n]+", " ").trim();
         if (cls.isEmpty()) return new Entry(mtime, cls, date, id, time, name, "");
         return new Entry(mtime, cls, date, id, time, name, encodeTrack(Files.readAllBytes(gpx)));
@@ -358,21 +357,8 @@ public final class Segments {
         return Math.sqrt(dx * dx + dy * dy);
     }
 
-    private static Object get(Object o, String... path) {
-        for (String k : path) {
-            if (!(o instanceof Map<?, ?> m)) return null;
-            o = m.get(k);
-        }
-        return o;
-    }
 
-    private static String str(Object o) {
-        return o == null ? "" : o.toString();
-    }
 
-    private static double number(Object o) {
-        return o instanceof Number n ? n.doubleValue() : 0;
-    }
 
     // ---- cache ---------------------------------------------------------------------------------------------
 
@@ -861,11 +847,6 @@ public final class Segments {
 
     // ---- output --------------------------------------------------------------------------------------------
 
-    private static void replace(Path f, String content) throws IOException {
-        Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
-        Files.writeString(tmp, content, StandardCharsets.UTF_8);
-        Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-    }
 
     private static String page() {
         String label = DescribeGarminFile.accountLabelOf(DescribeGarminFile.account());
@@ -1019,13 +1000,11 @@ public final class Segments {
             var reduced=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
             var TILES='https://tile.openstreetmap.org/{z}/{x}/{y}.png',ATTR='&copy; OpenStreetMap';
             function pad(n){return String(n).padStart(2,'0')}
-            function fmtInt(v){return Math.round(v).toLocaleString('en-US').replace(/,/g,' ')}
             function clock(s){s=Math.round(s);var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?h+':'+pad(m)+':'+pad(x):m+':'+pad(x)}
             function dayNo(d){return Date.UTC(+d.slice(0,4),+d.slice(5,7)-1,+d.slice(8,10))/864e5}
             function fmtDate(d){return +d.slice(8,10)+' '+MON[+d.slice(5,7)-1]+' '+d.slice(0,4)}
             function weekday(d){return WD[new Date(dayNo(d)*864e5).getUTCDay()]}
             function href(e){return e.date.slice(0,4)+'/'+e.date.slice(5,7)+'/'+e.date+'-report.html'+(e.id?'#a'+e.id:'')}
-            function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
             function decode(s){var pts=[],i=0,lat=0,lon=0;
               while(i<s.length){for(var k=0;k<2;k++){var r=0,sh=0,b;do{b=s.charCodeAt(i++)-63;r|=(b&31)<<sh;sh+=5}while(b>=32);
                 var d=(r&1)?~(r>>1):(r>>1);if(k==0)lat+=d;else lon+=d}pts.push([lat/1e5,lon/1e5])}

@@ -1,18 +1,14 @@
 package net.lckx.garmin;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.util.List;
 import java.util.Map;
 
-import static net.lckx.garmin.DescribeGarminFile.at;
+import static net.lckx.garmin.Util.at;
 import static net.lckx.garmin.DescribeGarminFile.esc;
 import static net.lckx.garmin.DescribeGarminFile.jsStr;
-import static net.lckx.garmin.DescribeGarminFile.num;
-import static net.lckx.garmin.DescribeGarminFile.str;
+import static net.lckx.garmin.Util.num;
+import static net.lckx.garmin.Util.str;
 
 /**
  * The records page: the best ever per kind of record, the best of every year, and per year the distance and time of
@@ -31,23 +27,30 @@ final class Records {
             for (Object o : DescribeGarminFile.Overview.shown(e.summary())) {
                 String sport = str(at(o, "sport"));
                 Double d = DescribeGarminFile.Overview.distanceOf(o), dur = num(at(o, "duration"));
-                boolean norec = DescribeGarminFile.Overview.NOT_A_RECORD.contains(e.date() + " " + str(at(o, "start")))
-                        || sport.equals("treadmill_running");
+                boolean norec = DescribeGarminFile.Overview.notARecord(sport, e.date().toString(), str(at(o, "start")));
                 if (n++ > 0) data.append(',');
                 data.append('[').append(jsStr(e.date().toString())).append(',')
                         .append(jsStr(e.href() + "#act" + DescribeGarminFile.Overview.sectionOf(e.summary(), o))).append(',')
                         .append(jsStr(str(at(o, "name")))).append(',').append(jsStr(DescribeGarminFile.Overview.sportGroup(sport))).append(',')
                         .append(d == null || d.isNaN() ? 0 : Math.round(d)).append(',').append(dur == null || dur.isNaN() ? 0 : Math.round(dur))
-                        .append(',').append(norec ? 1 : 0).append(']');
+                        .append(',').append(norec ? 1 : 0).append(',').append(swimBests(o)).append(']');
             }
         }
         data.append(']');
         Path page = dir.resolve(PAGE_FILE);
-        Path tmp = page.resolveSibling(PAGE_FILE + ".tmp");
-        Files.writeString(tmp, page(data.toString().replace("</", "<\\/")), StandardCharsets.UTF_8);
-        Files.move(tmp, page, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        Util.replace(page, page(data.toString().replace("</", "<\\/")));
         System.out.printf("Records: %d activities.%n", n);
         return page;
+    }
+
+    /** {"50":seconds,…} of a pool swim (see {@link SwimBests}), or 0. */
+    private static String swimBests(Object o) {
+        if (!(at(o, "swimBests") instanceof Map<?, ?> m) || m.isEmpty()) return "0";
+        StringBuilder b = new StringBuilder("{");
+        m.forEach((k, v) -> {
+            if (v instanceof Number n) b.append(b.length() > 1 ? "," : "").append('"').append(k).append("\":").append(DescribeGarminFile.trimNum(n.doubleValue()));
+        });
+        return b.append('}').toString();
     }
 
     private static String page(String data) {
@@ -72,6 +75,12 @@ final class Records {
     }
 
     private static final String CSS = """
+            table.peryear{font-size:13px}table.peryear th,table.peryear td{white-space:nowrap}
+            table.peryear th{white-space:nowrap;vertical-align:bottom;text-align:right}table.peryear th:first-child{text-align:left}
+            table.peryear th small{font-weight:400;font-size:11.5px}table.peryear td,table.peryear th{padding:6px 7px}
+            table.peryear td a{color:inherit;text-decoration:none}table.peryear td a:hover{color:var(--accent);text-decoration:underline}
+            table.peryear td.best{background:color-mix(in srgb,var(--accent) 13%,transparent);font-weight:650}
+            table.peryear td.best a{color:var(--accent)}
             table.peryear td small{display:block;font-size:11.5px;color:var(--muted);font-weight:400}
             table.peryear td.total{border-left:1px solid var(--line)}
             #best .tile small{color:var(--muted)}
@@ -85,13 +94,11 @@ final class Records {
     private static final String JS = """
             (function(){
             var ACTS=window.ACTS.map(function(r){return {date:r[0],href:r[1],name:r[2],group:r[3],dist:r[4],dur:r[5],norec:r[6],
-              kmh:r[4]>0&&r[5]>0?r[4]/r[5]*3.6:0};});
-            function grp(n){var s=String(n),o='';while(s.length>3){o=' '+s.slice(-3)+o;s=s.slice(0,-3);}return s+o;}
-            function fmtKm(m){if(m<1000)return Math.round(m)+' m';var p=(m/1000).toFixed(2).split('.');return grp(p[0])+'.'+p[1]+' km';}
+              kmh:r[4]>0&&r[5]>0?r[4]/r[5]*3.6:0,sb:r[7]||{}};});
+            function fmtKm(m){if(m<1000)return Math.round(m)+' m';var p=(m/1000).toFixed(2).split('.');return fmtInt(+p[0])+'.'+p[1]+' km';}
             function fmtDur(s){s=Math.round(s);var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
               return (h?h+':'+(m<10?'0':''):'')+m+':'+(x<10?'0':'')+x;}
-            function fmtHours(s){var h=Math.floor(s/3600),m=Math.round(s%3600/60);if(m==60){h++;m=0;}return grp(h)+' h '+(m<10?'0':'')+m;}
-            function escH(t){return String(t).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+            function fmtHours(s){var h=Math.floor(s/3600),m=Math.round(s%3600/60);if(m==60){h++;m=0;}return fmtInt(h)+' h '+(m<10?'0':'')+m;}
             function longDate(d){var M=L(['January','February','March','April','May','June','July','August','September','October','November','December'],
               ['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december']);
               return +d.slice(8,10)+' '+M[+d.slice(5,7)-1]+' '+d.slice(0,4);}
@@ -112,14 +119,24 @@ final class Records {
               {label:'Longest walk or hike',nl:'Langste wandeling of tocht',h:['Walk','longest','Wandeling','langste'],g:'walking',by:'dist'},
               {label:'Longest swim',nl:'Langste zwembeurt',h:['Swim','longest','Zwemmen','langste'],g:'swimming',by:'dist'},
               {label:'Fastest swim, 1 km or more',nl:'Snelste zwembeurt, 1 km of meer',h:['Swim','fastest ≥ 1 km','Zwemmen','snelste ≥ 1 km'],g:'swimming',min:1000,by:'kmh'},
+              {label:'Fastest 50 m swim',nl:'Snelste 50 m zwemmen',h:['Swim','best 50 m','Zwemmen','beste 50 m'],g:'swimming',sb:50},
+              {label:'Fastest 100 m swim',nl:'Snelste 100 m zwemmen',h:['Swim','best 100 m','Zwemmen','beste 100 m'],g:'swimming',sb:100},
+              {label:'Fastest 200 m swim',nl:'Snelste 200 m zwemmen',h:['Swim','best 200 m','Zwemmen','beste 200 m'],g:'swimming',sb:200},
+              {label:'Fastest 400 m swim',nl:'Snelste 400 m zwemmen',h:['Swim','best 400 m','Zwemmen','beste 400 m'],g:'swimming',sb:400},
+              {label:'Fastest 1000 m swim',nl:'Snelste 1000 m zwemmen',h:['Swim','best 1000 m','Zwemmen','beste 1000 m'],g:'swimming',sb:1000},
               {label:'Longest row or paddle',nl:'Langste roei- of peddeltocht',h:['Row/paddle','longest','Roeien','langste'],g:'rowing_and_paddling',by:'dist'}];
             function bestOf(rec,list){var best=null;
+              // The best 50 m … 1000 m of a pool swim: the lowest time over consecutive lengths (SwimBests).
+              if(rec.sb){list.forEach(function(x){var t=x.sb[rec.sb];if(x.norec||x.group!==rec.g||!(t>0))return;
+                if(!best||t<best.sb[rec.sb])best=x;});return best;}
               list.forEach(function(x){
                 if(x.norec||x.group!==rec.g||(rec.min&&x.dist<rec.min))return;
                 if(rec.by==='kmh'&&(!(x.kmh>0)||x.kmh>(MAX_KMH[x.group]||999)))return;
                 var v=x[rec.by];if(!(v>0))return;if(!best||v>best[rec.by])best=x;});
               return best;}
             function recText(rec,b){
+              // Pace only on the second line (keeps the table narrow); the swim's length is in the tooltip.
+              if(rec.sb){var t=b.sb[rec.sb];return [fmtDur(t),paceStr(rec.sb/t*3.6,true),L('in a swim of ','in een zwembeurt van ')+fmtKm(b.dist)];}
               var per100=b.group==='swimming',pace=b.group==='running'||b.group==='walking'||per100;
               var sp=function(){return pace?paceStr(b.kmh,per100):b.kmh.toFixed(1)+' km/h';};
               var v=rec.by==='dist'?fmtKm(b.dist):rec.by==='dur'?fmtDur(b.dur):sp();
@@ -128,14 +145,14 @@ final class Records {
 
             var by={};ACTS.forEach(function(x){var y=x.date.slice(0,4);(by[y]=by[y]||[]).push(x);});
             var years=Object.keys(by).sort().reverse();
-            if(ACTS.length)document.getElementById('span').textContent=L(grp(ACTS.length)+' activities, from '+longDate(ACTS[0].date)+' (the first one recorded) to '+longDate(ACTS[ACTS.length-1].date)+'.',
-              grp(ACTS.length)+' activiteiten, van '+longDate(ACTS[0].date)+' (de eerste die geregistreerd is) tot '+longDate(ACTS[ACTS.length-1].date)+'.');
+            if(ACTS.length)document.getElementById('span').textContent=L(fmtInt(ACTS.length)+' activities, from '+longDate(ACTS[0].date)+' (the first one recorded) to '+longDate(ACTS[ACTS.length-1].date)+'.',
+              fmtInt(ACTS.length)+' activiteiten, van '+longDate(ACTS[0].date)+' (de eerste die geregistreerd is) tot '+longDate(ACTS[ACTS.length-1].date)+'.');
 
             // ---- best ever
             var cols=[],tiles=document.getElementById('best');
             RECORDS.forEach(function(rec){var b=bestOf(rec,ACTS);if(!b)return;cols.push([rec,b]);var tx=recText(rec,b);
               var t=document.createElement('a');t.className='tile link';t.href=b.href;t.title=L('Open this activity','Open deze activiteit');
-              t.innerHTML='<div class="v">'+escH(tx[0])+'</div><div class="l">'+escH(L(rec.label,rec.nl))+'<small><br>'+escH(b.date+' · '+b.name)+'<br>'+escH(tx[1])+'</small></div>';
+              t.innerHTML='<div class="v">'+esc(tx[0])+'</div><div class="l">'+esc(L(rec.label,rec.nl))+'<small><br>'+esc(b.date+' · '+b.name)+'<br>'+esc(tx[1]+(tx[2]?' · '+tx[2]:''))+'</small></div>';
               tiles.appendChild(t);});
 
             // ---- each year's best, one sport at a time so the table fits without scrolling sideways
@@ -145,22 +162,22 @@ final class Records {
             var SP='running';try{SP=localStorage.getItem('garmin-records-sport')||SP;}catch(e){}
             if(!SPORTS.some(function(g){return g[0]===SP;})&&SPORTS.length)SP=SPORTS[0][0];
             var pick=document.getElementById('yearSport');
-            pick.innerHTML=SPORTS.map(function(g){return '<a href="#" data-g="'+g[0]+'">'+escH(L(g[1],g[2]))+'</a>';}).join('');
+            pick.innerHTML=SPORTS.map(function(g){return '<a href="#" data-g="'+g[0]+'">'+esc(L(g[1],g[2]))+'</a>';}).join('');
             pick.onclick=function(ev){var a=ev.target.closest('a[data-g]');if(!a)return;ev.preventDefault();SP=a.dataset.g;
               try{localStorage.setItem('garmin-records-sport',SP);}catch(e){}yearTable();};
             function yearTable(){
               pick.querySelectorAll('a').forEach(function(a){a.classList.toggle('on',a.dataset.g===SP);});
               var cs=cols.filter(function(c){return c[0].g===SP;});
               var o=['<table class="peryear"><thead><tr><th>'+L('Year','Jaar')+'</th>'];
-              cs.forEach(function(c){var h=c[0].h;o.push('<th title="'+escH(L(c[0].label,c[0].nl))+'">'+escH(L(h[1],h[3]))+'</th>');});
+              cs.forEach(function(c){var h=c[0].h;o.push('<th title="'+esc(L(c[0].label,c[0].nl))+'">'+esc(L(h[1],h[3]))+'</th>');});
               o.push('</tr></thead><tbody>');
               years.forEach(function(y){var cells=cs.map(function(c){return bestOf(c[0],by[y]);});
                 if(!cells.some(function(b){return b;}))return;
                 o.push('<tr><td><b>'+y+'</b></td>');
                 cells.forEach(function(b,i){if(!b){o.push('<td class="num muted">–</td>');return;}
                   var tx=recText(cs[i][0],b),top=b===cs[i][1];
-                  o.push('<td class="num'+(top?' best':'')+'"><a href="'+escH(b.href)+'" title="'
-                    +escH(b.date+' · '+b.name+(top?' · '+L('best of all years','beste van alle jaren'):''))+'">'+escH(tx[0])+'</a><small>'+escH(tx[1])+'</small></td>');});
+                  o.push('<td class="num'+(top?' best':'')+'"><a href="'+esc(b.href)+'" title="'
+                    +esc(b.date+' · '+b.name+(tx[2]?' · '+tx[2]:'')+(top?' · '+L('best of all years','beste van alle jaren'):''))+'">'+esc(tx[0])+'</a><small>'+esc(tx[1])+'</small></td>');});
                 o.push('</tr>');});
               o.push('</tbody></table>');document.getElementById('years').innerHTML=o.join('');}
             yearTable();
@@ -172,21 +189,28 @@ final class Records {
             function gOf(x){return known[x.group]&&x.group!=='other'?x.group:'other';}
             var sum={},used={};
             ACTS.forEach(function(x){var y=x.date.slice(0,4),g=gOf(x),k=y+' '+g,t=y+' total';used[g]=1;
-              [k,t].forEach(function(key){var s=sum[key]=sum[key]||{dist:0,dur:0,n:0};s.dist+=x.dist;s.dur+=x.dur;s.n++;});});
+              [k,t].forEach(function(key){var s=sum[key]=sum[key]||{dist:0,dur:0,n:0,gs:{}};s.dist+=x.dist;s.dur+=x.dur;s.n++;s.gs[x.group]=1;});});
+            // The overview, filtered on that year (and sport); "Other" only when the year's others are all one group.
+            function listHref(y,g,s){var p='from='+y+'-01-01&to='+y+'-12-31';
+              if(g!=='total'){var one=Object.keys(s.gs);if(g!=='other')p='sport='+g+'&'+p;else if(one.length===1)p='sport='+one[0]+'&'+p;}
+              return 'index.html#'+p;}
             var gs=GROUPS.filter(function(g){return used[g[0]];}).concat([['total','Total','Totaal']]);
+            // Per column one unit: distance when the sport has distances (from 1 km in a year), else time.
+            var byDist={};gs.forEach(function(g){byDist[g[0]]=years.some(function(y){var s=sum[y+' '+g[0]];return s&&s.dist>=1000;});});
             var top={};gs.forEach(function(g){years.forEach(function(y){var s=sum[y+' '+g[0]];if(!s)return;
-              var v=s.dist>0?s.dist:s.dur,b=top[g[0]];if(!b||v>b.v)top[g[0]]={v:v,y:y};});});
+              var v=byDist[g[0]]?s.dist:s.dur,b=top[g[0]];if(!b||v>b.v)top[g[0]]={v:v,y:y};});});
             o=['<table class="peryear"><thead><tr><th>'+L('Year','Jaar')+'</th>'];
-            gs.forEach(function(g){o.push('<th'+(g[0]==='total'?' class="total"':'')+'>'+escH(L(g[1],g[2]))+'<br><small>'+L('distance · time','afstand · tijd')+'</small></th>');});
+            gs.forEach(function(g){o.push('<th'+(g[0]==='total'?' class="total"':'')+'>'+esc(L(g[1],g[2]))+'<br><small>'+L('distance · time','afstand · tijd')+'</small></th>');});
             o.push('</tr></thead><tbody>');
-            years.forEach(function(y){o.push('<tr><td><b>'+y+'</b></td>');
+            years.forEach(function(y){o.push('<tr><td><b><a href="'+listHref(y,'total',sum[y+' total'])+'">'+y+'</a></b></td>');
               gs.forEach(function(g){var s=sum[y+' '+g[0]],cls='num'+(g[0]==='total'?' total':'');
                 if(!s){o.push('<td class="'+cls+' muted">–</td>');return;}
                 var best=top[g[0]]&&top[g[0]].y===y;
-                var main=s.dist>=1000?grp(Math.round(s.dist/1000))+' km':fmtHours(s.dur);
-                var small=(s.dist>=1000?fmtHours(s.dur)+' · ':'')+s.n+'×';
-                o.push('<td class="'+cls+(best?' best':'')+'" title="'+escH(y+' · '+L(g[1],g[2])+': '+s.n+' '+L('activities','activiteiten')+(best?' · '+L('biggest year','grootste jaar'):''))+'">'
-                  +main+'<small>'+small+'</small></td>');});
+                var km=byDist[g[0]];
+                var main=km?(s.dist>=1000?fmtInt(Math.round(s.dist/1000))+' km':s.dist>0?Math.round(s.dist)+' m':'–'):fmtHours(s.dur);
+                var small=(km?fmtHours(s.dur)+' · ':'')+s.n+'×';
+                o.push('<td class="'+cls+(best?' best':'')+'" title="'+esc(y+' · '+L(g[1],g[2])+': '+s.n+' '+L('activities','activiteiten')+(best?' · '+L('biggest year','grootste jaar'):''))+'">'
+                  +'<a href="'+esc(listHref(y,g[0],s))+'">'+main+'</a><small>'+small+'</small></td>');});
               o.push('</tr>');});
             o.push('</tbody></table>');document.getElementById('totals').innerHTML=o.join('');
             })();

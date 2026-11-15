@@ -1,10 +1,8 @@
 package net.lckx.garmin;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -51,9 +49,7 @@ public final class YearReview {
         Path dir = DescribeGarminFile.dataDir(DescribeGarminFile.account());
         Files.createDirectories(dir);
         Path page = dir.resolve(PAGE_FILE);
-        Path tmp = page.resolveSibling(PAGE_FILE + ".tmp");
-        Files.writeString(tmp, page(), StandardCharsets.UTF_8);
-        Files.move(tmp, page, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        Util.replace(page, page());
         Path data = dir.resolve(YEARS_DATA);
         if (Files.exists(data)) {
             TreeSet<String> years = new TreeSet<>();
@@ -306,7 +302,6 @@ public final class YearReview {
               return h?h+NB+T('h','u')+(m?NB+String(m).padStart(2,'0'):''):m+NB+'min'}
             function hm(h){h=((h%24)+24)%24;var H=Math.floor(h),M=Math.round((h-H)*60);if(M==60){H=(H+1)%24;M=0}return H+':'+String(M).padStart(2,'0')}
             function href(d,id){return d.slice(0,4)+'/'+d.slice(5,7)+'/'+d+'-report.html'+(id?'#a'+id:'')}
-            function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
             function rgba(hex,a){var n=parseInt(hex.slice(1),16);return 'rgba('+(n>>16)+','+(n>>8&255)+','+(n&255)+','+a+')'}
             function mix(a,b,t){var x=parseInt(a.slice(1),16),y=parseInt(b.slice(1),16);
               function ch(s){return Math.round(((x>>s)&255)*(1-t)+((y>>s)&255)*t)}return 'rgb('+ch(16)+','+ch(8)+','+ch(0)+')'}

@@ -1,10 +1,11 @@
 package net.lckx.garmin;
 
+import static net.lckx.garmin.Util.*;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -112,6 +113,7 @@ public final class Together {
         try (Stream<Path> s = Files.walk(dir)) {
             for (Path p : (Iterable<Path>) s::iterator) {
                 Matcher m = JSON_FILE.matcher(p.getFileName().toString());
+                if (Duplicates.isOldCopy(p.getFileName().toString())) continue;
                 if (!m.matches()) continue;
                 Path gpx = p.resolveSibling(p.getFileName().toString().replaceFirst("\\.json$", ".gpx"));
                 if (!Files.exists(gpx)) continue;
@@ -126,7 +128,7 @@ public final class Together {
                     a = readAct(p, key, mtime, m.group(1), Long.parseLong(m.group(2)));
                     if (a == null) continue;
                 }
-                if (DescribeGarminFile.Overview.HIDDEN_SPORTS.contains(a.sport)) continue;
+                if (DescribeGarminFile.Overview.HIDDEN_SPORTS.contains(a.sport) || Duplicates.isDuplicate(a.id)) continue;
                 fresh.put("A\t" + key, actLine(a));
                 out.add(a);
             }
@@ -137,13 +139,13 @@ public final class Together {
     private static Act readAct(Path json, String key, long mtime, String date, long id) {
         try {
             Map<?, ?> j = (Map<?, ?>) DescribeGarminFile.Json.parse(Files.readString(json));
-            String gmt = str(get(j, "summaryDTO", "startTimeGMT")), local = str(get(j, "summaryDTO", "startTimeLocal"));
-            double secs = number(get(j, "summaryDTO", "duration")), metres = number(get(j, "summaryDTO", "distance"));
+            String gmt = str(at(j, "summaryDTO", "startTimeGMT")), local = str(at(j, "summaryDTO", "startTimeLocal"));
+            double secs = numOr(at(j, "summaryDTO", "duration"), 0), metres = numOr(at(j, "summaryDTO", "distance"), 0);
             if (gmt.length() < 19 || secs <= 0) return null;
             long start = LocalDateTime.parse(gmt.substring(0, 19)).toEpochSecond(ZoneOffset.UTC);
-            String sport = SportCorrection.sport(id, str(get(j, "activityTypeDTO", "typeKey")), metres, secs);
+            String sport = SportCorrection.sport(id, str(at(j, "activityTypeDTO", "typeKey")), metres, secs);
             return new Act(key, mtime, id, date, local.length() >= 16 ? local.substring(11, 16) : "", sport,
-                    str(get(j, "activityName")), metres / 1000, secs, start, start + Math.round(secs));
+                    str(at(j, "activityName")), metres / 1000, secs, start, start + Math.round(secs));
         } catch (Exception e) {
             return null;
         }
@@ -369,27 +371,9 @@ public final class Together {
         replace(f, b.toString());
     }
 
-    private static void replace(Path f, String content) throws IOException {
-        Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
-        Files.writeString(tmp, content, StandardCharsets.UTF_8);
-        Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-    }
 
-    private static Object get(Object o, String... path) {
-        for (String p : path) {
-            if (!(o instanceof Map<?, ?> m)) return null;
-            o = m.get(p);
-        }
-        return o;
-    }
 
-    private static String str(Object o) {
-        return o == null ? "" : o.toString();
-    }
 
-    private static double number(Object o) {
-        return o instanceof Number n ? n.doubleValue() : 0;
-    }
 
     private static String page(String me, String partner, String dataFile) {
         String a = DescribeGarminFile.accountLabelOf(me), b = DescribeGarminFile.accountLabelOf(partner);
@@ -567,12 +551,10 @@ public final class Together {
             function cap(s){return s.charAt(0).toUpperCase()+s.slice(1)}
             function fx(v,d){var s=v.toFixed(d);return NL?s.replace('.',','):s}
             var reduced=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
-            function fmtInt(v){return Math.round(v).toLocaleString('en-US').replace(/,/g,' ')}
             function fmtDate(s){return +s.slice(8,10)+' '+MON[+s.slice(5,7)-1]+' '+s.slice(0,4)}
             function longDate(s){var d=new Date(s+'T12:00:00Z');return cap(WD[d.getUTCDay()])+' '+(+s.slice(8,10))+' '+MONTHS[+s.slice(5,7)-1]+' '+s.slice(0,4)}
             function fmtDur(s){var h=Math.floor(s/3600),m=Math.round(s%3600/60);if(m==60){h++;m=0}return h?h+' h '+String(m).padStart(2,'0'):m+' min'}
             function clock(s){s=Math.max(0,Math.round(s));var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h+':'+String(m).padStart(2,'0')+':'+String(x).padStart(2,'0')}
-            function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
             function ints(s){var out=[],i=0,v=0;while(i<s.length){var r=0,sh=0,b;do{b=s.charCodeAt(i++)-63;r|=(b&31)<<sh;sh+=5}while(b>=32);v+=(r&1)?~(r>>1):(r>>1);out.push(v)}return out}
             function line(s){var v=ints(s),out=[],la=0,lo=0;for(var i=0;i+1<v.length;i+=2)out.push([v[i]/1e5,v[i+1]/1e5]);return out}
             // ints() already sums the deltas; positions are stored as deltas too, so undo the running sum per coordinate.

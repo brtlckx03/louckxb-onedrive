@@ -1,10 +1,11 @@
 package net.lckx.garmin;
 
+import static net.lckx.garmin.Util.*;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -14,7 +15,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
@@ -59,7 +59,6 @@ public final class BestEfforts {
     private static final double RUN_JUMP = 12, RIDE_JUMP = 30;
 
     /** Same as the overview's records: activities whose numbers are not real (date + start time). */
-    private static final Set<String> NOT_A_RECORD = Set.of("2012-12-13 20:33", "2012-12-17 13:02");
 
     private static final Pattern ACTIVITY_JSON = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})_(\\d+)_(.*)\\.json");
 
@@ -91,7 +90,7 @@ public final class BestEfforts {
         try (Stream<Path> s = Files.walk(dir)) {
             for (Path p : (Iterable<Path>) s::iterator) {
                 Matcher m = ACTIVITY_JSON.matcher(p.getFileName().toString());
-                if (!m.matches()) continue;
+                if (!m.matches() || Duplicates.isOldCopy(p.getFileName().toString())) continue;
                 String key = dir.relativize(p).toString().replace('\\', '/');
                 long mtime = mtime(p);
                 Act a = cache.get(key);
@@ -141,16 +140,14 @@ public final class BestEfforts {
 
     private static Act load(Path json, String date, String id, long mtime) throws IOException {
         Map<?, ?> j = (Map<?, ?>) DescribeGarminFile.Json.parse(Files.readString(json));
-        String type = str(get(j, "activityTypeDTO", "typeKey"));
-        String name = clean(str(get(j, "activityName")));
-        String startLocal = str(get(j, "summaryDTO", "startTimeLocal"));
+        String type = str(at(j, "activityTypeDTO", "typeKey"));
+        String name = clean(str(at(j, "activityName")));
+        String startLocal = str(at(j, "summaryDTO", "startTimeLocal"));
         String start = startLocal.length() >= 16 ? startLocal.substring(11, 16) : "";
-        double metres = number(get(j, "summaryDTO", "distance")), secs = number(get(j, "summaryDTO", "duration"));
+        double metres = numOr(at(j, "summaryDTO", "distance"), 0), secs = numOr(at(j, "summaryDTO", "duration"), 0);
         String sport = SportCorrection.sport(SportCorrection.id(id), type, metres, secs);
-        String group = DescribeGarminFile.Overview.sportGroup(sport);
-        // Treadmill distances are the watch's estimate, not a measured course.
-        String kind = sport.equals("treadmill_running") ? "" : group.equals("running") ? "run" : group.equals("cycling") ? "ride" : "";
-        if (NOT_A_RECORD.contains(date + " " + start)) kind = "";
+        // Treadmill runs and the fake runs of NOT_A_RECORD set no best efforts.
+        String kind = DescribeGarminFile.Overview.recordKind(sport, date, start);
         // A short "run" at over 18 km/h on average was a ride (SportCorrection only looks at 5 km and more).
         if (kind.equals("run") && secs > 0 && metres / secs * 3.6 > SHORT_RIDE_KMH) kind = "";
         double[] dists = kind.equals("run") ? RUN : kind.equals("ride") ? RIDE : new double[0];
@@ -400,21 +397,8 @@ public final class BestEfforts {
         }
     }
 
-    private static Object get(Object o, String... path) {
-        for (String k : path) {
-            if (!(o instanceof Map<?, ?> m)) return null;
-            o = m.get(k);
-        }
-        return o;
-    }
 
-    private static String str(Object o) {
-        return o == null ? "" : o.toString();
-    }
 
-    private static double number(Object o) {
-        return o instanceof Number n ? n.doubleValue() : 0;
-    }
 
     private static String clean(String s) {
         return s.replaceAll("[\\t\\r\\n]+", " ").trim();
@@ -472,34 +456,11 @@ public final class BestEfforts {
 
     // ---- output --------------------------------------------------------------------------------------------
 
-    /**
-     * One activity per outing: a ride recorded on both the bike computer and the watch shows up twice, on the same
-     * day and starting within {@value #SAME_OUTING_MIN} minutes. The longer recording stays.
-     */
+    /** One activity per outing: the second recording of the same outing ({@link Duplicates}) is left out. */
     private static List<Act> withoutDuplicates(Iterable<Act> all) {
-        List<Act> acts = new ArrayList<>();
-        for (Act a : all) if (!a.kind.isEmpty() && a.best.length > 0 && !Double.isNaN(a.best[0])) acts.add(a);
-        acts.sort(java.util.Comparator.comparing(Act::date).thenComparing(Act::start));
         List<Act> out = new ArrayList<>();
-        for (Act a : acts) {
-            Act prev = null;
-            for (int i = out.size() - 1; i >= 0 && out.get(i).date.equals(a.date); i--) {
-                Act o = out.get(i);
-                if (o.kind.equals(a.kind) && Math.abs(minutes(o.start) - minutes(a.start)) <= SAME_OUTING_MIN) {
-                    prev = o;
-                    break;
-                }
-            }
-            if (prev == null) out.add(a);
-            else if (a.secs > prev.secs) out.set(out.indexOf(prev), a);
-        }
+        for (Act a : all) if (!Duplicates.isDuplicate(a.id)) out.add(a);
         return out;
-    }
-
-    private static final int SAME_OUTING_MIN = 15;
-
-    private static int minutes(String hhmm) {
-        return hhmm.length() < 5 ? -999 : Integer.parseInt(hhmm.substring(0, 2)) * 60 + Integer.parseInt(hhmm.substring(3, 5));
     }
 
     private static void writeData(Path f, Iterable<Act> acts) throws IOException {
@@ -533,11 +494,6 @@ public final class BestEfforts {
         return String.format(Locale.ROOT, "%." + decimals + "f", v);
     }
 
-    private static void replace(Path f, String content) throws IOException {
-        Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
-        Files.writeString(tmp, content, StandardCharsets.UTF_8);
-        Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-    }
 
     private static String page() {
         String label = DescribeGarminFile.accountLabelOf(DescribeGarminFile.account());
@@ -721,7 +677,6 @@ public final class BestEfforts {
             function fmtRough(s){if(s>=3600){var m=Math.round(s/60);return Math.floor(m/60)+' h '+two(m%60)}return fmtT(Math.round(s/5)*5)}
             function fmtPace(secPerKm){return fmtT(secPerKm)}
             function href(a){return a.date.slice(0,4)+'/'+a.date.slice(5,7)+'/'+a.date+'-report.html#a'+a.id}
-            function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
             function dec(x){return NL?String(x).replace('.',','):String(x)}
             function km(v){return dec((Math.round(v*10)/10).toFixed(1))}
             function kmh(e){return dec(speed(e).toFixed(1))}

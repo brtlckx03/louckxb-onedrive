@@ -1,10 +1,11 @@
 package net.lckx.garmin;
 
+import static net.lckx.garmin.Util.*;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -137,9 +138,6 @@ public final class Explorer {
         return out;
     }
 
-    private static String str(Object o) {
-        return o == null ? "" : o.toString();
-    }
 
     /** Just enough of a JavaScript literal parser for the heatmap rows: arrays, strings, numbers, null. */
     private static final class Parser {
@@ -274,11 +272,6 @@ public final class Explorer {
         out.add(x * n + y);
     }
 
-    private static void replace(Path f, String content) throws IOException {
-        Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
-        Files.writeString(tmp, content, StandardCharsets.UTF_8);
-        Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-    }
 
     // ---- the page
 
@@ -433,11 +426,9 @@ public final class Explorer {
               if(row&&row.scrollWidth>row.clientWidth)row.scrollLeft+=cur.getBoundingClientRect().left-row.getBoundingClientRect().left-row.clientWidth/2+cur.offsetWidth/2})();
             var reduced=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
             var THIS_YEAR=String(new Date().getFullYear());
-            function fmtInt(v){return Math.round(v).toLocaleString('en-US').replace(/,/g,' ')}
             function dec(s){return NL?String(s).replace('.',','):String(s)}
             function fmtDate(s){return +s.slice(8,10)+' '+MONTHS[+s.slice(5,7)-1]+' '+s.slice(0,4)}
             function href(a){return a[0].slice(0,4)+'/'+a[0].slice(5,7)+'/'+a[0]+'-report.html'+(a[2]?'#a'+a[2]:'')}
-            function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
             function rgba(hex,a){var n=parseInt(hex.slice(1),16);return 'rgba('+(n>>16)+','+(n>>8&255)+','+(n&255)+','+a+')'}
             function key(x,y){return x*N+y}
             var tip=document.getElementById('tip');

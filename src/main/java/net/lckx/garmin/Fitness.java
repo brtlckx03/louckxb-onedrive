@@ -1,17 +1,17 @@
 package net.lckx.garmin;
 
+import static net.lckx.garmin.Util.*;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -101,10 +101,6 @@ public final class Fitness {
             else secs = Math.min(secs, MAX_SECS_NO_DISTANCE);
             this.effSecs = secs;
         }
-
-        long end() {
-            return a.start + Math.round(nz(a.secs));
-        }
     }
 
     public static void main(String[] args) throws IOException {
@@ -131,7 +127,7 @@ public final class Fitness {
                 boolean act = am.matches(), rep = !act && rm.matches();
                 if (!act && !rep) continue;
                 String key = dir.relativize(p).toString().replace('\\', '/');
-                if (key.contains("/wellness/")) continue;
+                if (key.contains("/wellness/") || (act && Duplicates.isOldCopy(fn))) continue;
                 long mtime = Files.getLastModifiedTime(p).toMillis();
                 Object c = cache.get(key);
                 long cm = c instanceof Act a ? a.mtime : c instanceof Night n ? n.mtime : -1;
@@ -179,9 +175,9 @@ public final class Fitness {
         if (t.length() >= 19) start = LocalDateTime.parse(t.substring(0, 19)).toEpochSecond(ZoneOffset.UTC);
         String time = local.length() >= 16 ? local.substring(11, 16) : "";
         if (start < 0) start = LocalDate.parse(date).atStartOfDay().toEpochSecond(ZoneOffset.UTC) + 12 * 3600;
-        return new Act(mtime, date, id, start, time, type, clean(str(j.get("activityName"))), num(at(s, "duration")),
-                num(at(s, "distance")), num(at(s, "averageHR")), num(at(s, "maxHR")), num(at(s, "activityTrainingLoad")),
-                num(at(s, "trainingEffect")), str(at(j, "eventTypeDTO", "typeKey")));
+        return new Act(mtime, date, id, start, time, type, clean(str(j.get("activityName"))), numOr(at(s, "duration"), Double.NaN),
+                numOr(at(s, "distance"), Double.NaN), numOr(at(s, "averageHR"), Double.NaN), numOr(at(s, "maxHR"), Double.NaN), numOr(at(s, "activityTrainingLoad"), Double.NaN),
+                numOr(at(s, "trainingEffect"), Double.NaN), str(at(j, "eventTypeDTO", "typeKey")));
     }
 
     private static Night loadNight(Path p, String date, long mtime) throws IOException {
@@ -191,28 +187,15 @@ public final class Fitness {
         if (i >= 0) {
             int e = h.indexOf("</script>", i);
             if (e > 0 && DescribeGarminFile.Json.parse(h.substring(i + SUMMARY_START.length(), e)) instanceof Map<?, ?> m) {
-                rhr = num(m.get("restingHR"));
-                sleep = num(m.get("sleepSeconds"));
+                rhr = numOr(m.get("restingHR"), Double.NaN);
+                sleep = numOr(m.get("sleepSeconds"), Double.NaN);
             }
         }
         return new Night(mtime, date, rhr, sleep);
     }
 
-    private static Object at(Object o, String... keys) {
-        for (String k : keys) {
-            if (!(o instanceof Map<?, ?> m)) return null;
-            o = m.get(k);
-        }
-        return o;
-    }
 
-    private static double num(Object o) {
-        return o instanceof Number n ? n.doubleValue() : Double.NaN;
-    }
 
-    private static String str(Object o) {
-        return o == null ? "" : o.toString();
-    }
 
     private static String clean(String s) {
         return s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim();
@@ -267,11 +250,6 @@ public final class Fitness {
         replace(f, b.toString());
     }
 
-    private static void replace(Path f, String content) throws IOException {
-        Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
-        Files.writeString(tmp, content, StandardCharsets.UTF_8);
-        Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-    }
 
     // ---- the model -----------------------------------------------------------------------------------------
 
@@ -369,22 +347,8 @@ public final class Fitness {
                 if (s.src == 'g') s.load = s.a.garminLoad * garminScale;
                 else if (s.src == 'd') s.load = Math.min(s.effSecs, MAX_SECS_ESTIMATED) / 60 * perMin.getOrDefault(s.group, fallbackPerMin);
             }
-            // The same effort recorded twice counts once.
-            scored.sort(Comparator.comparingLong((Scored s) -> s.a.start));
-            List<Scored> kept = new ArrayList<>();
-            for (Scored s : scored) {
-                for (int k = kept.size() - 1; k >= 0 && k >= kept.size() - 6; k--) {
-                    Scored o = kept.get(k);
-                    if (o.dropped) continue;
-                    long overlap = Math.min(o.end(), s.end()) - Math.max(o.a.start, s.a.start);
-                    double shorter = Math.min(o.a.secs, s.a.secs);
-                    if (overlap <= 0 || overlap < .5 * shorter) continue;
-                    if (better(s, o)) o.dropped = true;
-                    else s.dropped = true;
-                    break;
-                }
-                kept.add(s);
-            }
+            // The same effort recorded twice counts once (the shared rule of Duplicates).
+            for (Scored s : scored) s.dropped = Duplicates.isDuplicate(s.a.id);
             // Days.
             start = scored.stream().filter(s -> !s.dropped).map(s -> LocalDate.parse(s.a.date)).min(LocalDate::compareTo)
                     .orElse(today.minusYears(1));
@@ -449,11 +413,6 @@ public final class Fitness {
                 l.sort(Comparator.comparingDouble((Scored s) -> -s.load));
                 for (int i = 0; i < Math.min(3, l.size()); i++) l.get(i).kind = 2;
             });
-        }
-
-        private static boolean better(Scored a, Scored b) {
-            int ra = "hgd".indexOf(a.src), rb = "hgd".indexOf(b.src);
-            return ra != rb ? ra < rb : a.a.secs > b.a.secs;
         }
 
         int idx(String date) {
@@ -660,7 +619,7 @@ public final class Fitness {
     }
 
     private static final Map<String, String> GROUPS_NL = Map.ofEntries(Map.entry("running", "lopen"), Map.entry("cycling", "fietsen"),
-            Map.entry("indoor_cycling", "binnenfietsen"), Map.entry("walking", "wandelen"), Map.entry("swimming", "zwemmen"),
+            Map.entry("indoor_cycling", "indoor fietsen"), Map.entry("walking", "wandelen"), Map.entry("swimming", "zwemmen"),
             Map.entry("lap_swimming", "zwemmen"), Map.entry("open_water_swimming", "openwaterzwemmen"),
             Map.entry("rowing_and_paddling", "roeien en peddelen"), Map.entry("racket_sports", "racketsporten"),
             Map.entry("strength_training", "krachttraining"), Map.entry("fitness_equipment", "fitness"), Map.entry("others", "andere sporten"),
@@ -913,8 +872,7 @@ public final class Fitness {
             function iso(i){return dt(i).toISOString().slice(0,10)}
             function fmtDate(i){var d=dt(i);return d.getUTCDate()+' '+MONTHS[d.getUTCMonth()]+' '+d.getUTCFullYear()}
             function href(i,id){var s=iso(i);return s.slice(0,4)+'/'+s.slice(5,7)+'/'+s+'-report.html'+(id?'#a'+id:'')}
-            function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
-            function fmtDur(s){var h=Math.floor(s/3600),m=Math.round(s%3600/60);return h?h+(NL?' u ':' h ')+String(m).padStart(2,'0'):m+' min'}
+            function fmtDur(s){var h=Math.floor(s/3600),m=Math.round(s%3600/60);if(m==60){h++;m=0}return h?h+(NL?' u ':' h ')+String(m).padStart(2,'0'):m+' min'}
             function tsb(i){return CTL[i]-ATL[i]}
             function zone(v){return v>F.fresh?'fresh':v>=F.neutral?'neutral':v>=F.tired?'tired':'overreaching'}
             var ZONE_NL={fresh:'fris',neutral:'neutraal',tired:'vermoeid',overreaching:'overbelast'};

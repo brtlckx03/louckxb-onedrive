@@ -1,5 +1,7 @@
 package net.lckx.garmin;
 
+import static net.lckx.garmin.Util.*;
+
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -126,6 +128,9 @@ public class DescribeGarminFile {
         }
         if (pages) {
             // Only the overview and the other pages, from the reports already on disk (e.g. after another account's download).
+            // Day reports with an activity in sport-overrides.tsv that changed after them are written again first, so
+            // the pages that read the reports' summaries (years in motion, year in review, records) get the new sport.
+            for (LocalDate d : SportCorrection.staleDays(DATA_DIR)) writeReport(d, null);
             Overview.write();
             writePages();
             return;
@@ -353,6 +358,8 @@ public class DescribeGarminFile {
                 for (Path p : (Iterable<Path>) s::iterator) {
                     var m = ACTIVITY_FILE.matcher(p.getFileName().toString());
                     if (!m.matches() || !m.group(1).equals(date.toString())) continue;
+                    // An activity renamed in Garmin Connect is downloaded again: only its newest files count.
+                    if (Duplicates.isOldCopy(p.getFileName().toString())) continue;
                     String base = p.getFileName().toString().replaceFirst("\\.(fit|tcx|gpx|json)$", "");
                     Path[] slots = byBase.computeIfAbsent(base, k -> new Path[4]);
                     switch (m.group(4)) {
@@ -402,6 +409,8 @@ public class DescribeGarminFile {
         String sport = "";
         /** The type Garmin recorded, and why the activity counts as another sport (null when it doesn't). */
         String garminSport = "", sportReason;
+        /** The other recording of the same outing that counts instead of this one ({@link Duplicates}), or null. */
+        Long duplicateOf;
         /** Corrected pool-swim distance (its own file next to the data), or null. */
         SwimCorrection.Result correction;
         /** Open-water swims: distance estimated from swim time and pool pace, since GPS loses its fix under water. */
@@ -462,7 +471,13 @@ public class DescribeGarminFile {
             if (a.sportReason != null) a.sport = SportCorrection.sport(f.id(), a.sport, sm, ss);
             a.correction = SwimCorrection.update(a).orElse(null);
             a.openWater = OpenWaterCorrection.correct(a);
+            a.duplicateOf = Overview.HIDDEN_SPORTS.contains(a.sport) ? null : Duplicates.keptFor(f.id());
             return a;
+        }
+
+        /** The sport to show: Garmin's for an excluded activity (its counted sport is just "excluded"). */
+        String shownSport() {
+            return SportCorrection.EXCLUDED.equals(sport) ? garminSport : sport;
         }
 
         String title() {
@@ -500,6 +515,13 @@ public class DescribeGarminFile {
                 if (i > 0) j.append(',');
                 j.append("{\"name\":\"").append(jsonEscape(a.title())).append("\",\"sport\":\"").append(jsonEscape(a.sport))
                         .append("\",\"start\":\"").append(a.start == null ? "" : HM.format(a.start.atZone(a.zone))).append('"');
+                if (a.duplicateOf != null) j.append(",\"duplicate\":true");
+                Map<Integer, Double> sb = SwimBests.of(a);
+                if (!sb.isEmpty()) {
+                    j.append(",\"swimBests\":{");
+                    sb.forEach((d, t) -> j.append(j.charAt(j.length() - 1) == '{' ? "" : ",").append('"').append(d).append("\":").append(trimNum(t)));
+                    j.append('}');
+                }
                 jsonNum(j, "distance", at(s, "distance"));
                 if (a.correction != null && a.correction.differs()) jsonNum(j, "correctedDistance", a.correction.distance());
                 else if (a.openWater != null && a.openWater.differs()) jsonNum(j, "correctedDistance", a.openWater.distance());
@@ -575,14 +597,18 @@ public class DescribeGarminFile {
             h.append("</header>");
 
             double dist = 0, time = 0, cal = 0;
-            for (Activity a : day.activities) {
+            // Excluded activities (sport-overrides.tsv) and accidental recordings are shown below but not counted.
+            List<Activity> counted = day.activities.stream().filter(a -> !Overview.HIDDEN_SPORTS.contains(a.sport) && a.duplicateOf == null).toList();
+            int notCounted = day.activities.size() - counted.size();
+            for (Activity a : counted) {
                 dist += numOr(at(a.json, "summaryDTO", "distance"), 0);
                 time += numOr(at(a.json, "summaryDTO", "duration"), 0);
                 cal += numOr(at(a.json, "summaryDTO", "calories"), 0);
             }
             final double dist0 = dist, time0 = time, cal0 = cal;
             tiles(() -> {
-                tile(String.valueOf(day.activities.size()), "Activities", "count of activity files for this date", null);
+                tile(counted.size() + (notCounted > 0 ? " <small>(+" + notCounted + " " + t("not counted", "niet geteld") + ")</small>" : ""),
+                        "Activities", "count of activity files for this date", null);
                 if (dist0 > 0) tile(fmtDist(dist0), "Activity distance", "sum of summaryDTO.distance", "JSON");
                 if (time0 > 0) tile(fmtDur(time0), "Activity time", "sum of summaryDTO.duration", "JSON");
                 if (cal0 > 0) tile(fmtNum(cal0, 0) + " kcal", "Activity calories", "sum of summaryDTO.calories", "JSON");
@@ -669,7 +695,7 @@ public class DescribeGarminFile {
             }
             for (int i = 0; i < day.activities.size(); i++) {
                 Activity a = day.activities.get(i);
-                h.append("<a href=\"#act").append(i).append("\">").append(sportIcon(a.sport)).append(" ")
+                h.append("<a href=\"#act").append(i).append("\">").append(sportIcon(a.shownSport())).append(" ")
                         .append(esc(a.title())).append(a.start != null ? " · " + HM.format(a.start.atZone(a.zone)) : "")
                         .append("</a>");
             }
@@ -684,7 +710,7 @@ public class DescribeGarminFile {
             String jsonName = a.files.json == null ? "" : a.files.json.getFileName().toString();
             // Besides #act<n> (the order on this day) a stable anchor #a<garmin id>, used by the heatmap's links.
             h.append("<section class=\"card activity\" id=\"act").append(idx).append("\"><span class=\"anchor\" id=\"a").append(a.files.id()).append("\"></span><h2>")
-                    .append(sportIcon(a.sport)).append(" ").append(esc(a.title())).append("</h2><p class=\"sub\">");
+                    .append(sportIcon(a.shownSport())).append(" ").append(esc(a.title())).append("</h2><p class=\"sub\">");
             if (a.start != null) {
                 ZonedDateTime st = a.start.atZone(a.zone);
                 Double el = num(at(s, "elapsedDuration"));
@@ -692,11 +718,21 @@ public class DescribeGarminFile {
                 h.append(t("Started " + from + (to == null ? "" : " – ended " + to), "Gestart " + from + (to == null ? "" : " – gestopt " + to)))
                         .append(" (").append(esc(a.zone.getId())).append(") · ");
             }
-            h.append(sportSpan(a.sport)).append(" · ").append(t("activity id", "activiteit-id")).append(" ").append(a.files.id).append("</p>");
+            h.append(sportSpan(a.shownSport())).append(" · ").append(t("activity id", "activiteit-id")).append(" ").append(a.files.id).append("</p>");
             if ("strava".equals(str(at(a.json, "source")))) {
                 String url = esc(str(at(a.json, "stravaUrl")));
                 h.append("<p class=\"note\">📥 ").append(t("From Strava: this activity is not in Garmin Connect. <a href=\"" + url + "\">Open it on Strava</a>.",
                         "Uit Strava: deze activiteit staat niet in Garmin Connect. <a href=\"" + url + "\">Open ze op Strava</a>.")).append("</p>");
+            }
+            if (a.duplicateOf != null) {
+                long kept = a.duplicateOf;
+                int k = -1;
+                for (int i = 0; i < day.activities.size(); i++) if (day.activities.get(i).files.id() == kept) k = i;
+                String other = k >= 0 ? "<a href=\"#act" + k + "\">" + esc(day.activities.get(k).title()) + "</a>" : t("activity ", "activiteit ") + kept;
+                h.append("<p class=\"note\">♊ ").append(t("The same outing was recorded twice (e.g. on the watch and the bike computer); only "
+                                + other + " counts, this one is left out of every total and page.",
+                        "Deze tocht is twee keer opgenomen (bv. op het horloge en de fietscomputer); alleen " + other
+                                + " telt, deze wordt nergens meegeteld.")).append("</p>");
             }
             if (a.sportReason != null && SportCorrection.EXCLUDED.equals(a.sport))
                 h.append("<p class=\"note\">🚫 ").append(t("Not counted anywhere (overview, records, maps, fitness): " + esc(a.sportReason) + ". The downloaded files are unchanged.",
@@ -1952,14 +1988,11 @@ public class DescribeGarminFile {
             List<Entry> entries = new ArrayList<>(cache.descendingMap().values());
             Path out = DATA_DIR.resolve(OVERVIEW_FILE);
             Files.createDirectories(DATA_DIR);
-            Path tmp = out.resolveSibling(OVERVIEW_FILE + ".tmp");
-            Files.writeString(tmp, render(entries), StandardCharsets.UTF_8);
-            // Replace in one step, so a browser refreshing during a download never sees half a page.
-            Files.move(tmp, out, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            replace(out, render(entries));
             // The list of all reports, oldest first, for the previous/next day links in the reports.
             StringBuilder js = new StringBuilder("window.GARMIN_DAYS=[");
             for (Entry e : cache.values()) js.append(js.charAt(js.length() - 1) == '[' ? "" : ",").append(jsStr(e.href));
-            Files.writeString(DATA_DIR.resolve(DAYS_FILE), js.append("];\n"), StandardCharsets.UTF_8);
+            replace(DATA_DIR.resolve(DAYS_FILE), js.append("];\n").toString());
             return out;
         }
 
@@ -2027,8 +2060,8 @@ public class DescribeGarminFile {
                     .append("<a href=\"#\" data-range=\"lastyear\" onclick=\"return setRange('lastyear')\" data-nl=\"Vorig jaar\">Last year</a></span>")
                     .append("<span id=\"filterStatus\"></span></div>");
 
-            // Filled in by the page script from the visible rows, so the records follow the filters.
-            // The chart, calendar and records are folded away by default; these buttons open them.
+            // The chart and calendar are filled in by the page script from the visible rows, so they follow the filters;
+            // they are folded away by default and these buttons open them. Records has its own page.
             // The other pages are in the Site menu at the top.
             h.append("<div class=\"ranges panels\"><a href=\"#\" data-panel=\"trend\" onclick=\"return togglePanel('trend')\" data-nl=\"📊 Grafiek\">📊 Chart</a>")
                     .append("<a href=\"#\" data-panel=\"calendar\" onclick=\"return togglePanel('calendar')\" data-nl=\"📅 Kalender\">📅 Calendar</a>")
@@ -2104,7 +2137,6 @@ public class DescribeGarminFile {
                         .append(esc(sportGroup(str(at(o, "sport"))))).append("\" data-dist=\"")
                         .append(d == null ? 0 : Math.round(d)).append("\" data-kmh=\"").append(Math.round(kmh * 100) / 100.0)
                         .append("\" data-dur=\"").append(dur == null ? 0 : Math.round(dur))
-                        .append(NOT_A_RECORD.contains(e.date + " " + str(at(o, "start"))) || str(at(o, "sport")).equals("treadmill_running") ? "\" data-norec=\"1" : "")
                         .append("\" title=\"").append(esc(sportName(str(at(o, "sport")))))
                         .append(kmh > 0 ? " · " + fmtNum(kmh, 1) + " km/h" : "").append("\">")
                         .append(sportIcon(str(at(o, "sport")))).append(" ").append(esc(str(at(o, "name")))).append("</a>");
@@ -2180,6 +2212,18 @@ public class DescribeGarminFile {
          */
         static final Set<String> NOT_A_RECORD = Set.of("2012-12-13 20:33", "2012-12-17 13:02");
 
+        /** No record, best effort or segment time: the activities in {@link #NOT_A_RECORD}, and treadmill runs (their distance is the watch's estimate). */
+        static boolean notARecord(String sport, String date, String start) {
+            return NOT_A_RECORD.contains(date + " " + start) || sport.equals("treadmill_running");
+        }
+
+        /** "run" or "ride" for the activities that set records, best efforts and segment times, else "". */
+        static String recordKind(String sport, String date, String start) {
+            if (notARecord(sport, date, start)) return "";
+            String g = sportGroup(sport);
+            return g.equals("running") ? "run" : g.equals("cycling") ? "ride" : "";
+        }
+
         /**
          * Activity types left out of the overview (tiles, totals and rows); the day report still shows them.
          * overland: a single 5-second recording without distance (2025-02-27), started by accident;
@@ -2190,7 +2234,7 @@ public class DescribeGarminFile {
         /** The day's activities as the overview counts them. */
         static List<Object> shown(Map<String, Object> summary) {
             List<Object> acts = Optional.ofNullable(asList(summary.get("activities"))).orElse(List.of());
-            return acts.stream().filter(o -> !HIDDEN_SPORTS.contains(str(at(o, "sport")))).toList();
+            return acts.stream().filter(o -> !HIDDEN_SPORTS.contains(str(at(o, "sport"))) && !Boolean.TRUE.equals(at(o, "duplicate"))).toList();
         }
 
         /** The activity's section in its day report (#act0, #act1, …), counted over all activities, hidden ones too. */
@@ -2273,12 +2317,22 @@ public class DescribeGarminFile {
                 return s.toString().trim();
             }
 
+            /** Large totals read better rounded: 123 138 km rather than 123 137.53 km. */
+            static String bigDist(double m) {
+                return m >= 1_000_000 ? fmtNum(Math.round(m / 1000), 0) + " km" : fmtDist(m);
+            }
+
+            /** 6 960 h rather than 6959:53:51; up to 100 hours as h:mm:ss. */
+            static String bigDur(double s) {
+                return s >= 100 * 3600 ? fmtNum(Math.round(s / 3600), 0) + " h" : fmtDur(s);
+            }
+
             void tiles(StringBuilder h) {
                 // The ids let the filter show the totals of what is selected.
-                tile(h, String.valueOf(days), "Days with a report", "Dagen met een rapport", "tDays");
-                tile(h, String.valueOf(activities), "Activities", "Activiteiten", "tActs");
-                tile(h, fmtDist(dist), "Total distance", "Totale afstand", "tDist");
-                tile(h, fmtDur(time), "Total activity time", "Totale activiteitstijd", "tTime");
+                tile(h, fmtNum(days, 0), "Days with a report", "Dagen met een rapport", "tDays");
+                tile(h, fmtNum(activities, 0), "Activities", "Activiteiten", "tActs");
+                tile(h, bigDist(dist), "Total distance", "Totale afstand", "tDist");
+                tile(h, bigDur(time), "Total activity time", "Totale activiteitstijd", "tTime");
                 if (steps > 0) tile(h, fmtNum(steps, 0), "Steps", "Stappen", "tSteps");
                 // The clickable activity tiles get their own grid, so they always start on a new row.
                 h.append("</div><div class=\"tiles sports\">");
@@ -2730,28 +2784,6 @@ public class DescribeGarminFile {
         return asMap(m.values().iterator().next());
     }
 
-    static Object at(Object root, String... path) {
-        Object cur = root;
-        for (String p : path) {
-            if (!(cur instanceof Map<?, ?> m)) return null;
-            cur = m.get(p);
-        }
-        return cur;
-    }
-
-    static Double num(Object o) {
-        if (o instanceof Number n) return n.doubleValue();
-        return null;
-    }
-
-    private static double numOr(Object o, double def) {
-        Double d = num(o);
-        return d == null ? def : d;
-    }
-
-    static String str(Object o) {
-        return o == null ? "" : o.toString();
-    }
 
     // ------------------------------------------------------------------ FIT
 
@@ -3782,13 +3814,6 @@ public class DescribeGarminFile {
             #calChart svg{width:100%;height:auto;display:block;max-width:900px}#calChart rect.day:hover{stroke:var(--fg);stroke-width:1.5}
             #calendar .ranges{align-items:center}#calendar .ranges a{min-width:34px;text-align:center}
             #calYear{padding:3px 8px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--fg);font:inherit;font-size:13px}
-            #recMode{margin-left:auto}#recordTiles[hidden],#recordYears[hidden]{display:none}
-            table.peryear{font-size:13px}table.peryear th,table.peryear td{white-space:nowrap}
-            table.peryear th{white-space:nowrap;vertical-align:bottom;text-align:right}table.peryear th:first-child{text-align:left}
-            table.peryear th small{font-weight:400;font-size:11.5px}table.peryear td,table.peryear th{padding:6px 7px}
-            table.peryear td a{color:inherit;text-decoration:none}table.peryear td a:hover{color:var(--accent);text-decoration:underline}
-            table.peryear td.best{background:color-mix(in srgb,var(--accent) 13%,transparent);font-weight:650}
-            table.peryear td.best a{color:var(--accent)}
             html[lang=nl] #totals.filtered .tile .l::after{content:" · selectie"}
             .acts .dim,.dists .dim,.paces .dim{opacity:.35}
             .src{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.03em;padding:0 6px;border-radius:5px;color:#fff;vertical-align:1px;line-height:17px}
@@ -3886,7 +3911,7 @@ public class DescribeGarminFile {
             function fmtKm(m){return m>=1000?(m/1000).toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g,' ')+' km':Math.round(m)+' m';}
             function fmtDur(s){s=Math.round(s);var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
               return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(x).padStart(2,'0');}
-            function fmtInt(v){return String(Math.round(v)).replace(/\\B(?=(\\d{3})+(?!\\d))/g,' ');}
+            
             var ALL={};['tDays','tActs','tDist','tTime','tSteps'].forEach(function(id){var e=document.getElementById(id);if(e)ALL[id]=e.textContent;});
             function setTile(id,v){var e=document.getElementById(id);if(e)e.textContent=v===null?ALL[id]:v;}
             function filterRows(){
@@ -3918,8 +3943,9 @@ public class DescribeGarminFile {
                 s.style.display=shown?'':'none';});
               renderTrend(recs,from,to);CAL.year=null;renderCalendar(recs,to);
   document.getElementById('totals').classList.toggle('filtered',any);
-              setTile('tDays',any?String(days):null);setTile('tActs',any?String(n):null);
-              setTile('tDist',any?fmtKm(tot):null);setTile('tTime',any?fmtDur(dur):null);setTile('tSteps',any?fmtInt(steps):null);
+              // Large totals rounded, like the page shows them (Overview.Totals.bigDist / bigDur).
+              setTile('tDays',any?fmtInt(days):null);setTile('tActs',any?fmtInt(n):null);
+              setTile('tDist',any?(tot>=1e6?fmtInt(tot/1000)+' km':fmtKm(tot)):null);setTile('tTime',any?(dur>=360000?fmtInt(dur/3600)+' h':fmtDur(dur)):null);setTile('tSteps',any?fmtInt(steps):null);
               document.querySelectorAll('.tiles.sports .tile.link').forEach(function(t){
                 t.classList.toggle('on',!!sp&&(t.dataset.sport===sp||(typ!==null&&(t.dataset.types||'').split(' ').indexOf(typ)>=0)));
                 var c=gc[t.dataset.sport]||0;t.querySelector('.n').textContent=c;t.classList.toggle('zero',c===0);
@@ -4070,7 +4096,7 @@ public class DescribeGarminFile {
                   tip.innerHTML=t;tip.style.display='block';tip.style.left=Math.min(ev.clientX+12,window.innerWidth-tip.offsetWidth-8)+'px';tip.style.top=(ev.clientY-tip.offsetHeight-10)+'px';});
                 r.addEventListener('mouseleave',function(){tip.style.display='none';});
                 r.addEventListener('click',function(){if(DAY_HREF[k])location.href=DAY_HREF[k];});});}
-            // ---- folding panels (chart, calendar, records); which ones are open is remembered
+            // ---- folding panels (chart, calendar); which ones are open is remembered
             var OPEN={};try{OPEN=JSON.parse(localStorage.getItem('garmin-overview-panels')||'{}')||{};}catch(e){}
             function showPanels(){document.querySelectorAll('[data-panel]').forEach(function(b){var id=b.dataset.panel,on=!!OPEN[id];
               b.classList.toggle('on',on);document.getElementById(id).classList.toggle('folded',!on);});}

@@ -1,5 +1,7 @@
 package net.lckx.garmin;
 
+import static net.lckx.garmin.Util.*;
+
 import static net.lckx.garmin.DescribeGarminFile.fmtDist;
 import static net.lckx.garmin.DescribeGarminFile.fmtDur;
 
@@ -102,7 +104,7 @@ final class OpenWaterCorrection {
         double watch = orZero(s.scaled(9)), strokes = orZero(s.num(10));
         double seconds = swimSeconds(fit, json);
         if (strokes <= 0 || seconds < 120) return null; // no swimming recorded (e.g. a GPS test standing on the shore)
-        Double connect = number(at(json, "summaryDTO", "distance"));
+        Double connect = num(at(json, "summaryDTO", "distance"));
         if (connect != null && connect > 0 && (watch <= 0 || Math.abs(connect / watch - 1) > EDITED)) {
             return new Result(connect, watch, seconds, Double.NaN, strokes, List.of(), true,
                     "Distance set by hand in Garmin Connect; the watch's GPS measured " + fmtDist(watch) + ".");
@@ -130,7 +132,7 @@ final class OpenWaterCorrection {
 
     /** Garmin Connect's duration (which the user may have corrected), else the FIT session's timer time. */
     static double swimSeconds(FitFile fit, Map<?, ?> json) {
-        Double d = number(at(json, "summaryDTO", "duration"));
+        Double d = num(at(json, "summaryDTO", "duration"));
         if (d != null && d > 0) return d;
         return orZero(fit.first(18).scaled(8));
     }
@@ -278,7 +280,7 @@ final class OpenWaterCorrection {
             FitMessage s = fit.first(18);
             double watch = orZero(s.scaled(9)), strokes = orZero(s.num(10)), timer = orZero(s.scaled(8));
             double seconds = swimSeconds(fit, json);
-            Double connect = number(at(json, "summaryDTO", "distance"));
+            Double connect = num(at(json, "summaryDTO", "distance"));
             List<PoolSwim> refs = nearby(root, date);
             double pace = refs.isEmpty() ? Double.NaN : median(refs.stream().map(PoolSwim::secondsPer100).toList());
             double byPace = seconds / pace * 100, byTimer = timer / pace * 100, byStrokes = strokeEstimate(strokes, refs);
@@ -312,18 +314,7 @@ final class OpenWaterCorrection {
 
     // ------------------------------------------------------------------ helpers
 
-    private static Object at(Object root, String... path) {
-        Object cur = root;
-        for (String p : path) {
-            if (!(cur instanceof Map<?, ?> m)) return null;
-            cur = m.get(p);
-        }
-        return cur;
-    }
 
-    private static Double number(Object o) {
-        return o instanceof Number n ? n.doubleValue() : null;
-    }
 
     private static double orZero(Double d) {
         return d == null ? 0 : d;
